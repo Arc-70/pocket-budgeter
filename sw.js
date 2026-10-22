@@ -1,5 +1,5 @@
 // Keeps Pocket Budget working offline. Bump VERSION when you change any file.
-const VERSION = 'pocket-budget-v1';
+const VERSION = 'pocket-budget-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {

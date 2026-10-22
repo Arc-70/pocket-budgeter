@@ -3,6 +3,11 @@
 A personal budget tracker that runs entirely in your phone's browser. No server, no account, no cost.
 Your data is saved on the device you use it on, and never leaves it unless you save a backup file.
 
+**What's inside:** a monthly plan (fixed costs, a spending budget, Need/Want categories) that carries over every 1st;
+quick logging with refunds and Zero Days; a cash schedule (A on the 1st, B every 7 days, next-B countdown, 5-payment months);
+stats (where it went, needs vs wants, budget vs actual, daily average vs target); and an optional game mode
+(under-budget streak, levels, weekly stars, achievements). Dark, light or automatic theme in Settings.
+
 ## Put it online for free (GitHub Pages)
 
 You only do this once. It works from a phone browser, but it's quicker on a PC.
@@ -38,5 +43,8 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 ## Updating the app
 
-If you change any file later, also change `VERSION` in `sw.js` (for example to `pocket-budget-v2`) so phones pick up the new version.
+To install a new version, upload the changed files to the same repository (**Add file → Upload files**, then **Commit changes**);
+files with the same name are replaced. Your data on the phone is not touched.
+
+If you change any file yourself, also change `VERSION` in `sw.js` (for example to `pocket-budget-v2`) so phones pick up the new version.
 Open the app twice after updating: the first open downloads the update, the second shows it.
