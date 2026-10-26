@@ -5,8 +5,8 @@ Your data is saved on the device you use it on and never leaves it unless you sa
 
 **What's inside**
 
-- **Today:** how much you have left to spend today. Each morning it takes what's left of the month's budget and divides it
-  by the days left (including today), then subtracts what you've logged today.
+- **Today:** how much you have left to spend today: your daily budget (the month's spending budget ÷ the days in the month)
+  minus what you've logged today. It starts fresh each day; leftovers and overspending don't carry over.
 - **Monthly plan:** a spending budget split into Need/Want categories, plus fixed costs (rent, phone…) you tick off as paid.
   A plan carries into the following months until you change it; earlier months keep their own plan.
 - **Quick logging:** spending, refunds and Zero Days (days you spent nothing). After adding, editing or deleting an entry,
@@ -72,7 +72,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v7` to `pocket-budget-v8`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v8` to `pocket-budget-v9`) so devices pick up the new version.
 When you're online the app always loads the newest version, so the update shows the next time you open it.
 If a home-screen app was only in the background, close it fully first. Settings shows which version is running.
 

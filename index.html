@@ -578,10 +578,10 @@ function viewHome() {
       h('button', { class: 'link-btn', onclick: () => { S.tab = 'wallet'; S.month = thisMonth(); render(); } }, 'See cash')));
   }
 
-  // Today: what's left of the month split evenly over the days left, minus what's been spent today
+  // Today: the fixed daily budget (monthly budget ÷ days in the month) minus what's been spent today
   if (isNow) {
     const spentToday = sum(list.filter((x) => x.date === t));
-    const allowance = Math.max(0, Math.round((budget - sum(list.filter((x) => x.date < t))) / (n - dayNum + 1)));
+    const allowance = dailyTarget(m);
     const leftToday = allowance - spentToday;
     out.push(h('div', { class: 'card' },
       h('div', null,
@@ -589,7 +589,7 @@ function viewHome() {
         h('div', { class: 'big ' + (leftToday < 0 ? 'bad' : '') }, moneyW(Math.abs(leftToday))),
         h('div', { class: 'small muted num' }, `${leftToday < 0 ? 'over today’s budget' : 'left to spend today'} · ${moneyW(spentToday)} spent of ${moneyW(allowance)}`)),
       h('div', { class: 'meter' }, h('i', { class: statusOf(spentToday, allowance), style: { width: (allowance ? Math.min(100, (spentToday / allowance) * 100) : spentToday > 0 ? 100 : 0) + '%' } })),
-      h('p', { class: 'tiny muted' }, 'Worked out each day from what’s left this month divided by the days left, including today.')));
+      h('p', { class: 'tiny muted' }, `Your daily budget is ${moneyW(budget)} ÷ ${n} days. It starts fresh each day.`)));
   }
 
   // Month summary
@@ -604,7 +604,7 @@ function viewHome() {
     isNow && budget ? h('p', { class: 'tiny muted' }, 'The mark shows where an even pace would put you today.') : null,
     h('div', { class: 'figures' },
       h('div', null, h('span', { class: 'tiny muted' }, 'Average a day'), h('b', { class: dayNum && avg > target ? 'bad' : '' }, dayNum ? moneyW(avg) : '–')),
-      h('div', null, h('span', { class: 'tiny muted' }, 'Target a day'), h('b', null, moneyW(target))),
+      h('div', null, h('span', { class: 'tiny muted' }, 'Daily budget'), h('b', null, moneyW(target))),
       isNow ? h('div', null, h('span', { class: 'tiny muted' }, 'Days left'), h('b', null, String(n - dayNum + 1)))
         : h('div', null, h('span', { class: 'tiny muted' }, 'Entries'), h('b', null, String(list.filter((t) => !t.zero).length))))));
 
@@ -713,7 +713,7 @@ function viewWallet() {
   const now = balanceOn(t);
   let sub;
   if (isFuture) sub = `${moneyW(sum(pays))} coming in ${monthName(m, 'short')}`;
-  else if (monthEnd(m) < c.since) sub = `You started counting on ${niceDate(c.since, true)}`;
+  else if (monthEnd(m) < c.since) sub = `Cash is counted from ${niceDate(c.since, true)}`;
   else {
     const spent = sum(txOf(m).filter((x) => x.date >= c.since && x.date <= t));
     sub = `${monthName(m, 'short')}: received ${moneyW(sum(pays.filter((p) => p.date <= t)))} · spent ${moneyW(spent)}`;
@@ -722,7 +722,8 @@ function viewWallet() {
   out.push(h('div', { class: 'card' },
     h('div', { class: 'small muted' }, now === null ? 'Cash in hand' : 'Cash in hand now'),
     h('div', { class: 'big ' + (now < 0 ? 'bad' : '') }, now === null ? '–' : moneyW(now)),
-    h('div', { class: 'small muted num' }, now === null ? `You start counting on ${niceDate(c.since, true)}` : sub)));
+    now === null ? h('div', { class: 'small bad' }, `Your starting balance is dated ${niceDate(c.since, true)}, which hasn’t come yet, so nothing is counted. `,
+      h('button', { class: 'link-btn', onclick: openSettings }, 'Change the date')) : h('div', { class: 'small muted num' }, sub)));
 
   const nb = nextB(t > c.since ? t : c.since);
   if (nb) {
@@ -744,7 +745,7 @@ function viewWallet() {
         h('div', { style: { flex: '1' } }, h('div', { style: { fontWeight: '550' } }, p.kind === 'A' ? 'Monthly amount (A)' : 'Weekly amount (B)'), h('div', { class: 'small muted' }, niceDate(p.date, true))),
         h('div', { class: 'stack', style: { gap: '1px', alignItems: 'flex-end' } }, h('span', { class: 'num' }, moneyW(p.amount)),
           h('span', { class: 'status ' + (got ? 'got' : isNext ? 'next' : '') }, got ? 'Received' : isNext ? 'Next' : 'Upcoming')));
-    })) : h('div', { class: 'empty' }, monthEnd(m) < c.since ? `You started counting on ${niceDate(c.since, true)}.` : 'No payments this month.')));
+    })) : h('div', { class: 'empty' }, monthEnd(m) < c.since ? `Cash is counted from ${niceDate(c.since, true)}.` : 'No payments this month.')));
 
   const ahead = [1, 2, 3].map((k) => shiftMonth(thisMonth(), k));
   out.push(h('div', { class: 'card' }, h('h3', null, 'Coming months'),
@@ -1005,7 +1006,7 @@ function cashFields() {
   const B = h('input', { inputmode: 'decimal', value: on && c.B ? centsIn(c.B) : '', placeholder: '0' });
   const start = h('input', { type: 'date', value: c.start || '' });
   const opening = h('input', { inputmode: 'decimal', value: on ? centsIn(c.opening) : '', placeholder: '0' });
-  const since = h('input', { type: 'date', value: c.since || todayStr() });
+  const since = h('input', { type: 'date', value: c.since || todayStr(), max: todayStr() });
   const fields = [
     h('div', { class: 'row' }, h('label', { class: 'field', style: { flex: '1' } }, 'Starting cash balance', opening), h('label', { class: 'field', style: { flex: '1' } }, 'As of', since)),
     h('p', { class: 'tiny muted' }, 'The cash you had on that date, before any A or B payment that day. Payments and spending from then on are added up for you.'),
@@ -1023,7 +1024,8 @@ function cashFields() {
     const ov = opening.value.trim(), minus = /^[-−]/.test(ov), o = blank(opening) ? 0 : parseAmount(ov.replace(/^[-−]/, ''));
     if (o === null) return 'The starting cash balance must be a number, like 1500 or -200.';
     if (b && !isDate(start.value)) return 'Pick the date of a B payment.';
-    if (!isDate(since.value)) return 'Pick the day you start counting from.';
+    if (!isDate(since.value)) return 'Pick the date of your starting cash balance.';
+    if (since.value > todayStr()) return `The “As of” date can’t be after today (${niceDate(todayStr(), true)}). Use the day you counted your cash.`;
     return { A: a, B: b, start: b ? start.value : null, since: since.value, opening: minus ? -o : o };
   };
   return { fields, read };
