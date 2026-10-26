@@ -453,7 +453,7 @@ function freshData() {
     paid: {},   // 'YYYY-MM' -> { fixedId: true }
     tx: {},     // 'YYYY-MM' -> [{ id, date, note, cat, amount, zero?, created }]
     pool: { start: null, rates: [] },  // spending pool: start payday, and the A/B amounts from each date on
-    slips: { rules: null, me: null, refs: {} },  // slip import: keyword rules, your account's last digits, slip ref -> entry id
+    slips: { rules: null, me: [], refs: {} },  // slip import: keyword rules, your accounts' last digits, slip ref -> entry id
   };
 }
 // Fills in missing fields and upgrades older saves. Returns null if `d` isn't Pocket Budget data.
@@ -465,6 +465,7 @@ function normalize(d) {
   out.plans = d.plans || {}; out.paid = d.paid || {}; out.tx = d.tx || {};
   if (d.pool) Object.assign(out.pool, d.pool);
   if (d.slips) Object.assign(out.slips, d.slips);
+  if (!Array.isArray(out.slips.me)) out.slips.me = out.slips.me ? [out.slips.me] : [];
   if (d.v === 3) Object.assign(out.cash, d.cash);
   else {
     // v2 had B = (X - A) / 4 and cash that started from zero each month
@@ -686,7 +687,7 @@ function slipMatch(text, month) {
   if (!all) return null;
   return slipRules().find((r) => {
     const k = slipNorm(r.kw);
-    if (!k || !cats.some((c) => c.id === r.cat)) return false;
+    if (!k || (r.cat !== 'skip' && !cats.some((c) => c.id === r.cat))) return false;
     if (words.includes(k) || (/[^a-z0-9฀-๿]/i.test(r.kw.trim()) && all.includes(k))) return true;
     return k.length >= 4 && (all.includes(k) || words.some((w) => (Math.abs(w.length - k.length) <= 1 && editDistance(w, k) <= 1) || (k.length >= 5 && w.startsWith(k.slice(0, -1)))));
   }) || null;
@@ -698,21 +699,26 @@ function slipQrRef(s) {
   return (s && tlv(tlv(s)['00'] || '')['02']) || null;
 }
 const SLIP_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
-// Picks the fields out of a slip's text. `note` is read separately (see slipRead), `qr` is the QR code's text.
-function parseSlip(text, qr, note) {
-  const out = { kind: null, date: null, time: null, amount: null, ref: slipQrRef(qr), from: null, note: '' };
+// Picks the fields out of a slip's text. `qr` is the QR code's text; `note` and `amount` are found by position
+// in slipRead when it can, and otherwise taken from the text here.
+function parseSlip(text, qr, note, amount) {
+  const out = { kind: null, date: null, time: null, amount: null, ref: slipQrRef(qr), from: null, to: '', note: '' };
   const k = text.match(/Successful\s+(payment|transfer)/i);
   if (k) out.kind = k[1].toLowerCase();
+  else if (out.ref) out.kind = 'slip';  // the heading was cropped off, but the QR code shows it's an SCB slip
   const d = text.match(/(\d{1,2})\s*([A-Za-z]{3})[a-z]*\.?\s*(\d{4})\s*[-–]\s*(\d{1,2})[:.](\d{2})/);
   if (d && SLIP_MONTHS[d[2].toLowerCase()]) { out.date = `${d[3]}-${pad(SLIP_MONTHS[d[2].toLowerCase()])}-${pad(Number(d[1]))}`; out.time = `${pad(Number(d[4]))}:${d[5]}`; }
-  const a = text.match(/AMOUNT[^\d\n]*([\d,]+\.\d{2})/i) || text.match(/AMOUNT[^\n]*\n[^\d\n]*([\d,]+\.\d{2})/i);
-  if (a) out.amount = parseAmount(a[1]);
+  const a = !amount && (text.match(/AMOUNT[^\d\n]*([\d,]+\.\d{2})/i) || text.match(/AMOUNT[^\n]*\n[^\d\n]*([\d,]+\.\d{2})/i));
+  out.amount = amount || (a ? parseAmount(a[1]) : null);
   if (!out.ref) { const r = text.match(/Ref\s*ID\s*:?\s*([A-Za-z0-9 ]{10,})/i); if (r) out.ref = r[1].replace(/\s/g, ''); }
   // the reference starts with the date, which helps when the printed date couldn't be read
   const rd = out.ref && out.ref.match(/^(20\d\d)(\d\d)(\d\d)/);
   if (!out.date && rd && Number(rd[2]) >= 1 && Number(rd[2]) <= 12 && Number(rd[3]) >= 1 && Number(rd[3]) <= 31) out.date = `${rd[1]}-${rd[2]}-${rd[3]}`;
-  const f = text.match(/x{3}-x{3}\s*(\d{3})\s*-?\s*(\d)/i);  // the first masked account is the sender's
-  if (f) out.from = `${f[1]}-${f[2]}`;
+  // the first masked account is the sender's: the last 3 digits before the dash, and the check digit
+  const f = text.match(/x{3}\s*-\s*x{3}[^\d\n]{0,2}(\d{3,6})\s*-\s*(\d)\b/i);
+  if (f) out.from = `${f[1].slice(-3)}-${f[2]}`;
+  const to = text.match(/^\s*(?:TO|T0|10)\b[^A-Za-z0-9\n]*([^\n]*)/m);
+  if (to) out.to = to[1].trim().slice(0, 60);
   if (note === undefined) note = (text.split(/\bNOTE\b[^\n]*\n/i)[1] || '').split(/For recipient/i)[0];
   out.note = String(note || '').replace(/\s+/g, ' ').trim().slice(0, 80);
   return out;
@@ -733,14 +739,31 @@ async function slipReader() {
   }
   return slipWorker;
 }
-// Reads one slip image: the QR code, the whole text, then the note area again at a larger size
+// The slip without the dark borders around it (status and navigation bars in screenshots, black edges), as [x, y, w, h]
+function slipBounds(img) {
+  const w = 120, ht = Math.max(1, Math.round(img.height * w / img.width));
+  const c = document.createElement('canvas'); c.width = w; c.height = ht;
+  const x = c.getContext('2d', { willReadFrequently: true }); x.drawImage(img, 0, 0, w, ht);
+  const p = x.getImageData(0, 0, w, ht).data, lum = (i) => 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
+  const dark = (n, at) => { let s = 0; for (let i = 0; i < n; i++) s += lum(at(i)); return s / n < 70; };
+  let top = 0, bot = ht - 1, left = 0, right = w - 1;
+  while (top < bot && dark(w, (i) => (top * w + i) * 4)) top++;
+  while (bot > top && dark(w, (i) => (bot * w + i) * 4)) bot--;
+  while (left < right && dark(bot - top + 1, (i) => ((top + i) * w + left) * 4)) left++;
+  while (right > left && dark(bot - top + 1, (i) => ((top + i) * w + right) * 4)) right--;
+  if (right - left < w * 0.3 || bot - top < ht * 0.3) return [0, 0, img.width, img.height];  // a dark picture: keep it all
+  const k = img.width / w;
+  return [Math.floor(left * k), Math.floor(top * k), Math.min(img.width, Math.ceil((right - left + 1) * k)), Math.min(img.height, Math.ceil((bot - top + 1) * k))];
+}
+// Reads one slip image: the QR code, the whole text, then the note area again at a readable size
 async function slipRead(file) {
   const worker = await slipReader();
   const img = await createImageBitmap(file);
-  const draw = (scale, [sx, sy, sw, sh] = [0, 0, img.width, img.height]) => {
-    const c = document.createElement('canvas'); c.width = Math.round(sw * scale); c.height = Math.round(sh * scale);
+  const box = slipBounds(img);
+  const draw = (scale, [sx, sy, sw, sh] = box) => {
+    const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(sw * scale)); c.height = Math.max(1, Math.round(sh * scale));
     const x = c.getContext('2d', { willReadFrequently: true });
-    x.filter = 'grayscale(1) contrast(1.6)'; x.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    x.filter = 'grayscale(1)'; x.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);  // no contrast boost: it turns the faint watermark behind notes into letters
     return c;
   };
   let qr = null;
@@ -749,21 +772,32 @@ async function slipRead(file) {
     const q = jsQR(px.data, px.width, px.height);
     if (q) { qr = q.data; break; }
   }
-  const scale = Math.min(2, 1600 / img.width);
+  // small images (forwarded through chat apps) are enlarged, big ones read as they are
+  const scale = Math.min(4, Math.max(1, 1400 / box[2]));
   const full = await worker.recognize(draw(scale), {}, { text: true, blocks: true });
-  const words = full.data.words || [];
-  const label = words.find((w) => /^NOTE$/i.test(w.text)), end = words.find((w) => /^recipient/i.test(w.text));
+  // word positions in the original image
+  const words = (full.data.words || []).map((w) => ({ text: w.text, x0: box[0] + w.bbox.x0 / scale, x1: box[0] + w.bbox.x1 / scale, y0: box[1] + w.bbox.y0 / scale, y1: box[1] + w.bbox.y1 / scale }));
+  // the amount is the number on the same line as the word AMOUNT
+  let amount = null;
+  const amtLabel = words.find((w) => /^AMOUNT$/i.test(w.text));
+  if (amtLabel) {
+    const mid = (amtLabel.y0 + amtLabel.y1) / 2, hgt = amtLabel.y1 - amtLabel.y0;
+    const n = words.find((w) => /^[\d,]+\.\d{2}$/.test(w.text) && w.x0 > amtLabel.x1 && Math.abs((w.y0 + w.y1) / 2 - mid) < hgt);
+    if (n) amount = parseAmount(n.text);
+  }
+  // the note sits under its label, left-aligned; read just that area, enlarged so its letters are about 40px tall
   let note;
+  const label = words.find((w) => /^NOTE$/i.test(w.text));
   if (label) {
-    const y0 = label.bbox.y1 / scale + 2, y1 = end ? end.bbox.y0 / scale - 4 : y0 + 80;
-    if (y1 - y0 > 8) {
-      await worker.setParameters({ tessedit_pageseg_mode: '6' });
-      note = (await worker.recognize(draw(4, [0, y0, img.width, y1 - y0]))).data.text;
-      await worker.setParameters({ tessedit_pageseg_mode: '3' });
+    const end = words.find((w) => w.y0 > label.y1 && /^(For|recipient)/i.test(w.text));
+    const lh = label.y1 - label.y0, x0 = Math.max(box[0], label.x0 - lh), x1 = box[0] + box[2] - (label.x0 - box[0]);
+    const y0 = label.y1 + 2, y1 = end ? end.y0 - 4 : y0 + lh * 4;
+    if (y1 - y0 > lh * 0.6 && x1 - x0 > lh) {
+      note = (await worker.recognize(draw(Math.min(4, Math.max(1, 40 / lh)), [x0, y0, x1 - x0, y1 - y0]))).data.text;
     }
   }
   img.close();
-  return parseSlip(full.data.text, qr, note);
+  return parseSlip(full.data.text, qr, note, amount);
 }
 const slipLogged = (ref) => { const id = ref && D.slips.refs[ref]; return !!id && Object.values(D.tx).some((l) => l.some((t) => t.id === id)); };
 
@@ -795,19 +829,18 @@ async function slipImport(files) {
 
 // The list to check: one row per slip, ticked unless it can't or shouldn't be logged
 function slipReview(rows) {
-  const me = D.slips.me, refs = new Set();
+  const refs = new Set();
   for (const row of rows) {
-    const r = row.read || {}, why = [];
-    row.date = r.date || ''; row.amount = r.amount ? centsIn(r.amount) : ''; row.ref = r.ref || null;
+    const r = row.read || {};
+    row.date = r.date || ''; row.amount = r.amount ? centsIn(r.amount) : ''; row.ref = r.ref || null; row.to = r.to || '';
     row.note = r.note || (r.kind ? `SCB ${r.kind}` : '');
-    const rule = slipMatch(row.note, (row.date || todayStr()).slice(0, 7));
-    row.cat = rule ? rule.cat : null; row.auto = !!rule; row.remember = false;
-    if (!row.read || (!r.amount && !r.date)) why.push('Couldn’t read this slip. Fill it in or leave it out.');
-    else if (me && r.from && r.from !== me) { why.push('Money sent to you: not logged here. Add it yourself if you need to.'); row.blocked = true; }
-    if (row.ref && (slipLogged(row.ref) || refs.has(row.ref))) { why.push('Already logged.'); row.blocked = true; }
+    row.remember = false;
+    slipRematch(row, true);
+    row.unread = !row.read || (!r.amount && !r.date);
+    row.notScb = !row.unread && !r.kind;
+    row.dup = !!row.ref && (slipLogged(row.ref) || refs.has(row.ref));
     if (row.ref) refs.add(row.ref);
-    row.why = why;
-    row.on = !row.blocked && !!row.read && !!(r.amount && r.date);
+    row.on = !row.unread && !row.notScb && !!(r.amount && r.date) && !slipBlocked(row) && !row.skipBy;
   }
   const body = $('#slipBody'), err = h('p', { class: 'error', role: 'alert' });
   const draw = () => {
@@ -822,31 +855,51 @@ function slipReview(rows) {
   };
   draw();
 }
+// Money sent to you (the sender isn't one of your accounts) and slips already logged can't be logged here
+const slipIncoming = (row) => !!(row.read && row.read.from && D.slips.me.length && !D.slips.me.includes(row.read.from));
+const slipBlocked = (row) => row.dup || slipIncoming(row);
+// Applies the keyword rules to the note (and the receiver's name, when it could be read); `first` is the initial read
+function slipRematch(row, first) {
+  const r = slipMatch(`${row.note} ${row.to}`, (isDate(row.date) ? row.date : todayStr()).slice(0, 7));
+  const wasSkipped = !!row.skipBy;
+  row.skipBy = r && r.cat === 'skip' ? r.kw : null;
+  if (row.skipBy) { if (row.auto) row.cat = null; row.auto = false; if (!wasSkipped) row.on = false; return; }
+  if (r && (first || row.auto || !row.cat)) { row.cat = r.cat; row.auto = true; }
+  else if (!r && row.auto) { row.cat = null; row.auto = false; }
+}
 function slipRow(row, redraw) {
-  const month = (isDate(row.date) ? row.date : todayStr()).slice(0, 7), cats = planFor(month).cats;
-  const cat = h('select', { 'aria-label': 'Category', disabled: row.blocked, onchange: (e) => { row.cat = e.target.value || null; row.auto = false; redraw(); } },
+  const month = (isDate(row.date) ? row.date : todayStr()).slice(0, 7), cats = planFor(month).cats, blocked = slipBlocked(row);
+  const cat = h('select', { 'aria-label': 'Category', disabled: blocked, onchange: (e) => { row.cat = e.target.value || null; row.auto = false; redraw(); } },
     h('option', { value: '' }, 'Pick a category'), cats.map((c) => h('option', { value: c.id, selected: c.id === row.cat }, c.name)));
-  const field = (label, key, attrs) => h('label', { class: 'field' }, label, h('input', { ...attrs, value: row[key], disabled: row.blocked, onchange: (e) => {
+  const field = (label, key, attrs) => h('label', { class: 'field' }, label, h('input', { ...attrs, value: row[key], disabled: blocked, onchange: (e) => {
     row[key] = e.target.value.trim();
-    if (key === 'note' && (row.auto || !row.cat)) { const r = slipMatch(row.note, month); row.cat = r ? r.cat : row.auto ? null : row.cat; row.auto = !!r; redraw(); }
+    if (key === 'note' || key === 'date') { slipRematch(row); redraw(); }
   } }));
+  const why = [];
+  if (row.unread) why.push('Couldn’t read this slip. Fill it in or leave it out.');
+  else if (row.notScb) why.push('This doesn’t look like an SCB payment or transfer slip. Check it, or leave it out.');
+  else if (!row.read.amount || !row.read.date) why.push(`Couldn’t read the ${!row.read.amount ? 'amount' : 'date'}. Fill it in to log this slip.`);
+  if (row.dup) why.push('Already logged.');
+  else if (slipIncoming(row)) why.push(h('span', null, `Money sent to you (from xxx-xxx${row.read.from}): not logged here. `,
+    h('button', { class: 'link-btn', type: 'button', onclick: () => { D.slips.me.push(row.read.from); persist(); row.on = !row.unread && !row.notScb && !row.skipBy; redraw(); } }, 'It’s my account')));
+  if (row.skipBy && !blocked) why.push(`Left out by the keyword “${row.skipBy}” (Don’t log). Tick it to log it anyway.`);
   return h('div', { class: 'slip-row ' + (row.on ? '' : 'off') },
     h('div', { class: 'row', style: { alignItems: 'flex-start' } },
       h('img', { class: 'slip-thumb', src: row.thumb, alt: 'Slip' }),
       h('div', { class: 'stack', style: { flex: '1', gap: '8px', minWidth: '0' } },
         h('label', { class: 'row small', style: { fontWeight: '600' } },
-          h('input', { type: 'checkbox', checked: row.on, disabled: row.blocked, style: { width: '20px', minHeight: '20px' }, onchange: (e) => { row.on = e.target.checked; redraw(); } }),
-          row.blocked ? 'Not logged' : 'Log this'),
+          h('input', { type: 'checkbox', checked: row.on, disabled: blocked, style: { width: '20px', minHeight: '20px' }, onchange: (e) => { row.on = e.target.checked; redraw(); } }),
+          blocked ? 'Not logged' : 'Log this'),
         h('div', { class: 'slip-grid' }, field('Amount', 'amount', { inputmode: 'decimal' }), field('Date', 'date', { type: 'date' })),
         field('Note', 'note', { maxlength: '80' }),
         cat,
-        row.cat && !row.auto && row.note && !row.blocked ? h('label', { class: 'row tiny muted' },
+        row.cat && !row.auto && row.note && !blocked ? h('label', { class: 'row tiny muted' },
           h('input', { type: 'checkbox', checked: row.remember, style: { width: '18px', minHeight: '18px' }, onchange: (e) => { row.remember = e.target.checked; } }),
           `Always put “${row.note}” in ${(cats.find((c) => c.id === row.cat) || {}).name}`) : null,
-        ...row.why.map((w) => h('p', { class: 'tiny warn' }, w)))));
+        ...why.map((w) => h('p', { class: 'tiny warn' }, w)))));
 }
 function slipLog(rows, err) {
-  const pick = rows.filter((r) => r.on);
+  const pick = rows.filter((r) => r.on && !slipBlocked(r));
   for (const row of pick) {
     const c = parseAmount(row.amount);
     if (!c) return showError(err, `Enter the amount for “${row.note || 'a slip'}”.`);
@@ -861,11 +914,12 @@ function slipLog(rows, err) {
     if (row.remember && !slipRules().some((r) => slipNorm(r.kw) === slipNorm(row.note))) slipRules().push({ kw: row.note, cat: row.cat });
     return t;
   });
-  // remember whose account the slips come from, so money sent to you can be told apart
-  if (!D.slips.me) {
+  // the first time, learn your account from the slips you log, so money sent to you can be told apart
+  if (!D.slips.me.length) {
     const counts = {};
     for (const row of pick) if (row.read && row.read.from) counts[row.read.from] = (counts[row.read.from] || 0) + 1;
-    D.slips.me = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+    const top = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0];
+    if (top) D.slips.me.push(top);
   }
   for (const row of rows) URL.revokeObjectURL(row.thumb);
   $('#slipSheet').close();
@@ -890,24 +944,29 @@ async function slipShared() {
 // Settings section: keyword rules, a box to try them, and your account
 function slipSettings() {
   const out = [h('div', { class: 'section-label' }, 'Slip keywords'),
-    h('p', { class: 'small muted' }, 'When a slip’s note contains a keyword, its entry goes in that category. Capitals, spaces and dashes don’t matter, so “7-11” also matches “7 11”. The first match wins.')];
+    h('p', { class: 'small muted' }, 'When a slip’s note contains a keyword, its entry goes in that category. Capitals, spaces and dashes don’t matter, so “7-11” also matches “7 11”. The first match wins. Use “Don’t log” for slips that aren’t spending, like TrueMoney top-ups or moving money to your savings.')];
   const cats = planFor(S.month).cats, rules = slipRules();
   const save = () => { persist(); try_.dispatchEvent(new Event('input')); };
   out.push(...rules.map((r, i) => h('div', { class: 'fixed-line' },
     h('input', { value: r.kw, maxlength: '40', 'aria-label': 'Keyword', onchange: (e) => { r.kw = e.target.value.trim(); save(); } }),
     h('select', { 'aria-label': `Category for ${r.kw}`, onchange: (e) => { r.cat = e.target.value || null; save(); } },
-      h('option', { value: '' }, 'Pick…'), cats.map((c) => h('option', { value: c.id, selected: c.id === r.cat }, c.name))),
+      h('option', { value: '' }, 'Pick…'), cats.map((c) => h('option', { value: c.id, selected: c.id === r.cat }, c.name)),
+      h('option', { value: 'skip', selected: r.cat === 'skip' }, 'Don’t log')),
     h('button', { class: 'x-btn', type: 'button', 'aria-label': `Remove ${r.kw}`, onclick: () => { rules.splice(i, 1); persist(); openSettings(); } }, '✕'))));
   out.push(h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { rules.push({ kw: '', cat: null }); persist(); openSettings(); } }, '+ Add keyword'));
   const result = h('p', { class: 'small muted' }, 'Type a note to see where it would go.');
   const try_ = h('input', { placeholder: 'Try a note, e.g. bus to work', 'aria-label': 'Try a note', oninput: () => {
     const v = try_.value.trim(), r = v && slipMatch(v, S.month);
-    result.textContent = !v ? 'Type a note to see where it would go.' : r ? `→ ${cats.find((c) => c.id === r.cat).name} (keyword “${r.kw}”)` : 'No keyword matches: you’d pick the category yourself.';
+    result.textContent = !v ? 'Type a note to see where it would go.' : !r ? 'No keyword matches: you’d pick the category yourself.'
+      : r.cat === 'skip' ? `→ Not logged (keyword “${r.kw}” is set to Don’t log)` : `→ ${cats.find((c) => c.id === r.cat).name} (keyword “${r.kw}”)`;
     result.className = 'small ' + (r ? 'good' : 'muted');
   } });
   out.push(try_, result);
-  if (D.slips.me) out.push(h('p', { class: 'tiny muted' }, `Slips from your account xxx-xxx${D.slips.me} are logged; slips of money sent to you are left out. `,
-    h('button', { class: 'link-btn', type: 'button', onclick: () => { D.slips.me = null; persist(); openSettings(); } }, 'Forget this account')));
+  if (D.slips.me.length) {
+    out.push(h('p', { class: 'tiny muted' }, `Slips from your account${D.slips.me.length > 1 ? 's' : ''} are logged; slips of money sent to you are left out.`));
+    out.push(...D.slips.me.map((acct, i) => h('div', { class: 'between tiny' }, h('span', { class: 'num' }, `xxx-xxx${acct}`),
+      h('button', { class: 'link-btn', type: 'button', onclick: () => { D.slips.me.splice(i, 1); persist(); openSettings(); } }, 'Forget'))));
+  }
   return out;
 }
 

@@ -66,7 +66,12 @@ Payments and transfers made in SCB EASY produce a slip image. Instead of typing 
   Grocery, Bus, MRT, Bike, Taxi and Food; change them, add more and try out notes in **Settings → Slip keywords**.
   When you pick a category yourself, you can tick **Always put "…" in …** to add a keyword for next time.
 - **Already logged:** each slip's reference is remembered (from its QR code), so the same slip can't be logged twice.
-- **Money sent to you:** the app learns your account from your slips; slips of money sent *to* you are left out.
+- **Not spending:** set a keyword to **Don't log** for slips that aren't spending, like TrueMoney top-ups (you log the TrueMoney
+  spending itself) or moving money to your own savings. Those slips arrive unticked; you can still tick one to log it.
+- **Money sent to you:** the app learns your account from your slips; slips of money sent *to* you are left out. If one of your
+  own slips is ever left out this way (for example a second SCB account), tap **It's my account** on it.
+- Slips can be the saved slip, a screenshot of it, a copy forwarded through LINE, or cropped; anything that isn't an SCB slip
+  arrives unticked with the reason.
 - Debit card, scanned-QR and TrueMoney payments don't make slips, so keep adding those with **+** as before.
 
 ## Hosting it (GitHub Pages)
