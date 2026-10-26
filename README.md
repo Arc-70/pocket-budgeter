@@ -51,6 +51,29 @@ A day-to-day pool that turns your lumpy A and B payments into a steady daily amo
 
 The pool is separate from everything else: it doesn't change your cash in hand, budget, categories or stats.
 
+## Logging from SCB slips
+
+Payments and transfers made in SCB EASY produce a slip image. Instead of typing those in:
+
+1. Tap **+**, then **Add from SCB slips…**, and pick one or more slips from your gallery.
+   On Android you can also select slips in the gallery and **Share** them to Pocket Budget (once it's installed to the home screen).
+2. The app reads each slip on your phone: the amount, the date, and your NOTE from the slip. Nothing is uploaded.
+   The first time, it downloads the slip reader (about 7 MB); after that it works offline.
+3. A list shows each slip. Fix anything that was misread (small notes are sometimes off by a letter), pick categories, and tap **Log**.
+   Tap **Undo** in the message afterwards to take them all back out.
+
+- **Categories:** a slip whose note contains a keyword goes straight into that keyword's category. The starting keywords are
+  Grocery, Bus, MRT, Bike, Taxi and Food; change them, add more and try out notes in **Settings → Slip keywords**.
+  When you pick a category yourself, you can tick **Always put "…" in …** to add a keyword for next time.
+- **Already logged:** each slip's reference is remembered (from its QR code), so the same slip can't be logged twice.
+- **Not spending:** set a keyword to **Don't log** for slips that aren't spending, like TrueMoney top-ups (you log the TrueMoney
+  spending itself) or moving money to your own savings. Those slips arrive unticked; you can still tick one to log it.
+- **Money sent to you:** the app learns your account from your slips; slips of money sent *to* you are left out. If one of your
+  own slips is ever left out this way (for example a second SCB account), tap **It's my account** on it.
+- Slips can be the saved slip, a screenshot of it, a copy forwarded through LINE, or cropped; anything that isn't an SCB slip
+  arrives unticked with the reason.
+- Debit card, scanned-QR and TrueMoney payments don't make slips, so keep adding those with **+** as before.
+
 ## Hosting it (GitHub Pages)
 
 This repository is already set up to be served as-is: there is no build step.
@@ -84,7 +107,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v9` to `pocket-budget-v10`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v10` to `pocket-budget-v11`) so devices pick up the new version.
 When you're online the app always loads the newest version, so the update shows the next time you open it.
 If a home-screen app was only in the background, close it fully first. Settings shows which version is running.
 
@@ -94,5 +117,6 @@ If a home-screen app was only in the background, close it fully first. Settings 
 |---|---|
 | `index.html` | The whole app: styles, markup and script |
 | `sw.js` | Service worker that caches the app so it works offline |
-| `manifest.webmanifest` | Name, colours and icons used when it's installed to a home screen |
+| `manifest.webmanifest` | Name, colours and icons used when it's installed to a home screen, and the Share target for slips |
+| `vendor/` | The slip reader (tesseract.js and jsQR); see `vendor/README.md` |
 | `icon*.png`, `icon.svg` | App icons |
