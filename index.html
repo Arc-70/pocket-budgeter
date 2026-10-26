@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
@@ -434,7 +434,7 @@ function dayLabel(d) {
 
 /* money: stored as integer satang/cents */
 function parseAmount(v) {
-  const t = String(v ?? '').trim().replace(/[,\s฿$]/g, '');
+  const t = String(v ?? '').trim().replace(/[,\s\p{Sc}]/gu, '');
   if (!/^\d{1,9}(\.\d{1,2})?$/.test(t)) return null;
   const [w, f = ''] = t.split('.');
   return Number(w) * 100 + Number((f + '00').slice(0, 2));
@@ -446,8 +446,10 @@ function setCurrency(code) {
     F.full = new Intl.NumberFormat(undefined, base);
     F.whole = new Intl.NumberFormat(undefined, { ...base, minimumFractionDigits: 0, maximumFractionDigits: 0 });
     F.short = new Intl.NumberFormat(undefined, { ...base, notation: 'compact', maximumFractionDigits: 1 });
-  } catch { if (code !== 'THB') setCurrency('THB'); }
+  } catch { if (code !== 'USD') setCurrency('USD'); }
 }
+function validCurrency(code) { try { new Intl.NumberFormat(undefined, { style: 'currency', currency: code }); return /^[A-Z]{3}$/.test(code); } catch { return false; } }
+const isDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v);
 const money = (c) => F.full.format(c / 100);
 const moneyW = (c) => (Math.abs(c) >= 100000 || c % 100 === 0 ? F.whole : F.full).format(c / 100);
 const moneyS = (c) => F.short.format(c / 100);
@@ -516,6 +518,17 @@ const colorOf = (c) => COLORS[c] || c || '#94a3b8';
 /* =================================================================== data */
 const KEY = 'pocket-budget-v2';
 const DEFAULT_PLAN = {
+  variable: 0,
+  fixed: [],
+  cats: [
+    { id: 'groceries', name: 'Groceries', type: 'need', budget: 0, icon: 'cart', color: 'green' },
+    { id: 'transport', name: 'Transport', type: 'need', budget: 0, icon: 'bus', color: 'cyan' },
+    { id: 'eating', name: 'Eating out', type: 'want', budget: 0, icon: 'food', color: 'orange' },
+    { id: 'other', name: 'Other', type: 'need', budget: 0, icon: 'box', color: 'amber' },
+  ],
+};
+// The built-in plan of v2. Installs that never saved a plan of their own were using it, so migration keeps it for them.
+const V2_PLAN = {
   variable: 600000,
   fixed: [{ id: 'rent', name: 'Rent', amount: 750000, icon: 'home' }, { id: 'phone', name: 'Phone', amount: 64200, icon: 'phone' }],
   cats: [
@@ -529,19 +542,32 @@ const DEFAULT_PLAN = {
 };
 function freshData() {
   return {
-    v: 2,
-    settings: { currency: 'THB', theme: 'dark', game: true, setupDone: false, lastBackup: 0, unlocked: {} },
-    cash: { X: 2000000, A: null, start: '2026-11-01' },
+    v: 3,
+    settings: { currency: 'USD', theme: 'system', game: true, setupDone: false, lastBackup: 0, unlocked: {} },
+    // A on the 1st of each month, B every 7 days from `start`; the running balance counts from `since`, with `opening` in hand that morning
+    cash: { A: 0, B: 0, start: null, since: null, opening: 0 },
     plans: {},  // 'YYYY-MM' -> plan; a month without one uses the latest earlier plan
     paid: {},   // 'YYYY-MM' -> { fixedId: true }
     tx: {},     // 'YYYY-MM' -> [{ id, date, note, cat, amount, zero?, created }]
   };
 }
+// Fills in missing fields and upgrades older saves. Returns null if `d` isn't Pocket Budget data.
+function normalize(d) {
+  if (!d || typeof d !== 'object' || (d.v !== 2 && d.v !== 3) || (d.tx && typeof d.tx !== 'object')) return null;
+  const out = freshData();
+  Object.assign(out.settings, d.settings);
+  out.plans = d.plans || {}; out.paid = d.paid || {}; out.tx = d.tx || {};
+  if (d.v === 3) Object.assign(out.cash, d.cash);
+  else {
+    // v2 had B = (X - A) / 4 and cash that started from zero each month
+    const c = d.cash || {};
+    if (c.A !== null && c.A !== undefined && c.start) out.cash = { A: c.A, B: Math.round((c.X - c.A) / 4), start: c.start, since: `${c.start.slice(0, 7)}-01`, opening: 0 };
+    if (!Object.keys(out.plans).length && (out.settings.setupDone || Object.keys(out.tx).length)) out.plans[Object.keys(out.tx).sort()[0] || thisMonth()] = clone(V2_PLAN);
+  }
+  return out;
+}
 let D = freshData();
-try {
-  const raw = localStorage.getItem(KEY);
-  if (raw) { const d = JSON.parse(raw); if (d && d.v === 2) D = Object.assign(freshData(), d); }
-} catch { /* start fresh */ }
+try { D = normalize(JSON.parse(localStorage.getItem(KEY))) || D; } catch { /* start fresh */ }
 setCurrency(D.settings.currency);
 
 function persist() {
@@ -564,73 +590,65 @@ function catInfo(id, m) {
   return c || { id: null, name: 'Uncategorized', icon: 'box', color: '#94a3b8', type: 'need', budget: 0 };
 }
 const txOf = (m) => D.tx[m] || [];
-const spentOf = (list) => list.reduce((a, t) => a + (t.amount || 0), 0);
+const sum = (list) => list.reduce((a, t) => a + (t.amount || 0), 0);
 const dailyTarget = (m) => Math.round(planFor(m).variable / daysIn(m));
 const fixedTotal = (p) => p.fixed.reduce((a, f) => a + f.amount, 0);
 const catsTotal = (p) => p.cats.reduce((a, c) => a + c.budget, 0);
 
-/* -------- cash schedule: A on the 1st, B every 7 days from the start date */
-const bAmount = () => (D.cash.A === null ? 0 : Math.round((D.cash.X - D.cash.A) / 4));
-function payments(m) {
-  const c = D.cash;
-  if (c.A === null || !c.start) return [];
-  const startM = c.start.slice(0, 7);
-  if (m < startM) return [];
-  const first = `${m}-01`, last = `${m}-${pad(daysIn(m))}`;
-  const out = [];
-  if (first >= `${startM}-01`) out.push({ date: first, kind: 'A', amount: c.A });
-  let k = Math.max(0, Math.ceil(daysBetween(c.start, first) / 7));
-  for (;; k++) {
-    const d = addDays(c.start, 7 * k);
-    if (d > last) break;
-    if (d >= first) out.push({ date: d, kind: 'B', amount: bAmount() });
-  }
+/* -------- cash: A on the 1st of each month, B every 7 days, kept as one running balance */
+const cashOn = () => !!D.cash.since;
+const monthEnd = (m) => `${m}-${pad(daysIn(m))}`;
+// B dates from `from` to `to`, ignoring when tracking started
+function bDates(from, to) {
+  const c = D.cash, out = [];
+  if (!c.B || !c.start) return out;
+  let d = c.start >= from ? c.start : addDays(c.start, 7 * Math.ceil(daysBetween(c.start, from) / 7));
+  for (; d <= to; d = addDays(d, 7)) out.push(d);
+  return out;
+}
+const nextB = (from) => bDates(from, addDays(from, 6))[0] || null;
+// Payments from `from` to `to`, counting only those on or after the day tracking started
+function payments(from, to) {
+  const c = D.cash, out = [];
+  if (!cashOn()) return out;
+  if (from < c.since) from = c.since;
+  if (c.A) for (let m = from.slice(0, 7); `${m}-01` <= to; m = shiftMonth(m, 1)) if (`${m}-01` >= from) out.push({ date: `${m}-01`, kind: 'A', amount: c.A });
+  for (const d of bDates(from, to)) out.push({ date: d, kind: 'B', amount: c.B });
   return out.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.kind < b.kind ? -1 : 1));
 }
-function nextB(from) {
+const monthPays = (m) => payments(`${m}-01`, monthEnd(m));
+// What a full month brings in, for planning: A plus B for each B date in it
+const income = (m) => (cashOn() ? D.cash.A + D.cash.B * bDates(`${m}-01`, monthEnd(m)).length : null);
+// Cash in hand at the end of `date`
+function balanceOn(date) {
   const c = D.cash;
-  if (c.A === null || !c.start) return null;
-  if (c.start >= from) return c.start;
-  return addDays(c.start, 7 * Math.ceil(daysBetween(c.start, from) / 7));
-}
-const bCount = (m) => payments(m).filter((p) => p.kind === 'B').length;
-function cashFor(m) {
-  const t = todayStr();
-  const pays = payments(m);
-  const received = pays.filter((p) => p.date <= t).reduce((a, p) => a + p.amount, 0);
-  const spent = spentOf(txOf(m).filter((x) => x.date <= t || m < thisMonth()));
-  return { pays, received, spent, balance: received - spent };
-}
-function cashAllTime() {
-  const c = D.cash;
-  if (c.A === null) return null;
-  let m = c.start.slice(0, 7), total = 0;
-  const end = thisMonth();
-  while (m <= end) { total += cashFor(m).balance; m = shiftMonth(m, 1); }
-  return total;
+  if (!cashOn() || date < c.since) return null;
+  const spent = sum(Object.values(D.tx).flat().filter((t) => t.date >= c.since && t.date <= date));
+  return c.opening + sum(payments(c.since, date)) - spent;
 }
 
 /* -------- streaks & game */
-function dayStat(date) {
-  const list = txOf(date.slice(0, 7)).filter((t) => t.date === date);
-  if (!list.length) return { logged: false };
-  const spent = spentOf(list);
-  return { logged: true, spent, under: spent <= dailyTarget(date.slice(0, 7)), zero: list.some((t) => t.zero) };
-}
 let gameCache = null;
 function game() {
-  if (gameCache) return gameCache;
   const t = todayStr();
-  const allDates = Object.values(D.tx).flat().map((x) => x.date).filter((d) => d <= t).sort();
-  const res = { current: 0, best: 0, underDays: 0, zeroDays: 0, monthsUnder: 0, zeroMonthMax: 0, starWeeks: 0, any: allDates.length > 0 };
-  if (allDates.length) {
+  if (gameCache && gameCache.day === t) return gameCache;
+  const days = new Map(); // date -> { spent, zero }
+  for (const x of Object.values(D.tx).flat()) {
+    if (x.date > t) continue;
+    const e = days.get(x.date) || { spent: 0, zero: false };
+    e.spent += x.amount || 0; e.zero ||= !!x.zero;
+    days.set(x.date, e);
+  }
+  const targets = {};
+  const res = { day: t, current: 0, best: 0, underDays: 0, zeroDays: 0, monthsUnder: 0, zeroMonthMax: 0, starWeeks: 0, any: days.size > 0 };
+  if (days.size) {
     let run = 0;
-    for (let d = allDates[0]; d <= t; d = addDays(d, 1)) {
-      const st = dayStat(d);
-      if (st.logged && st.under) { run++; res.underDays++; res.best = Math.max(res.best, run); }
-      else if (d === t && !st.logged) { /* today not logged yet: streak still alive */ }
+    for (let d = [...days.keys()].sort()[0]; d <= t; d = addDays(d, 1)) {
+      const st = days.get(d);
+      if (st && st.spent <= (targets[d.slice(0, 7)] ??= dailyTarget(d.slice(0, 7)))) { run++; res.underDays++; res.best = Math.max(res.best, run); }
+      else if (d === t && !st) { /* today not logged yet: streak still alive */ }
       else run = 0;
-      if (st.zero) res.zeroDays++;
+      if (st && st.zero) res.zeroDays++;
     }
     res.current = run;
   }
@@ -639,7 +657,7 @@ function game() {
     if (!list.length) continue;
     const z = new Set(list.filter((x) => x.zero).map((x) => x.date)).size;
     res.zeroMonthMax = Math.max(res.zeroMonthMax, z);
-    if (m < thisMonth() && planFor(m).variable > 0 && spentOf(list) <= planFor(m).variable) res.monthsUnder++;
+    if (m < thisMonth() && planFor(m).variable > 0 && sum(list) <= planFor(m).variable) res.monthsUnder++;
     res.starWeeks += weeks(m).filter((w) => w.state === 'star').length;
   }
   res.xp = res.underDays * 10 + res.zeroDays * 15 + res.monthsUnder * 100 + res.starWeeks * 25;
@@ -654,7 +672,7 @@ function weeks(m) {
   for (let s0 = 1, i = 1; s0 <= n; s0 += 7, i++) {
     const e0 = Math.min(n, s0 + 6);
     const from = `${m}-${pad(s0)}`, to = `${m}-${pad(e0)}`;
-    const spent = spentOf(list.filter((x) => x.date >= from && x.date <= to));
+    const spent = sum(list.filter((x) => x.date >= from && x.date <= to));
     const len = e0 - s0 + 1;
     let state;
     if (from > t) state = 'future';
@@ -676,7 +694,7 @@ const ACHIEVEMENTS = [
 function checkAchievements() {
   gameCache = null;
   const g = game();
-  let fresh = [];
+  const fresh = [];
   for (const a of ACHIEVEMENTS) if (a.test(g) && !D.settings.unlocked[a.id]) { D.settings.unlocked[a.id] = todayStr(); fresh.push(a); }
   if (fresh.length) { persist(); if (D.settings.game) setTimeout(() => toast(`🏆 Achievement unlocked: ${fresh.map((a) => a.name).join(', ')}`), 400); }
 }
@@ -695,7 +713,6 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 
 /* =================================================================== render */
 function render() {
-  gameCache = null;
   $('#monthLabel').textContent = monthName(S.month);
   for (const b of document.querySelectorAll('.nav-btn')) {
     if (b.dataset.tab === S.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
@@ -716,14 +733,14 @@ function statusOf(spent, budget) {
 /* ---------- Home */
 function viewHome() {
   const m = S.month, p = planFor(m), list = txOf(m);
-  const spent = spentOf(list), budget = p.variable, left = budget - spent;
+  const spent = sum(list), budget = p.variable, left = budget - spent;
   const isNow = m === thisMonth(), n = daysIn(m);
   const dayNum = isNow ? Number(todayStr().slice(8)) : m < thisMonth() ? n : 0;
-  const daysLeft = isNow ? n - dayNum + 1 : m > thisMonth() ? n : 0;
+  const daysLeft = n - dayNum + 1;
   const out = [];
 
   if (!D.settings.lastBackup && Object.values(D.tx).flat().length >= 15) {
-    out.push(h('div', { class: 'notice' }, h('b', null, 'Back up now and then. '), 'Your budget lives only on this phone. ',
+    out.push(h('div', { class: 'notice' }, h('b', null, 'Back up now and then. '), 'Your budget lives only on this device. ',
       h('button', { class: 'link-btn', onclick: exportBackup }, 'Save backup')));
   } else if (D.settings.lastBackup && Date.now() - D.settings.lastBackup > 30 * 864e5) {
     out.push(h('div', { class: 'notice' }, h('b', null, `Last backup ${Math.floor((Date.now() - D.settings.lastBackup) / 864e5)} days ago. `),
@@ -735,14 +752,11 @@ function viewHome() {
   const R = 52, C = 2 * Math.PI * R;
   const ringCol = left < 0 ? 'var(--bad)' : frac < 0.2 ? 'var(--warn)' : 'url(#ringGrad)';
   const ring = h('div', { class: 'ring' },
-    (() => {
-      const svg = s('svg', { viewBox: '0 0 120 120' },
-        s('defs', null, s('linearGradient', { id: 'ringGrad', x1: '0', y1: '0', x2: '1', y2: '1' },
-          s('stop', { offset: '0%', 'stop-color': '#38d9ef' }), s('stop', { offset: '55%', 'stop-color': '#4ade80' }), s('stop', { offset: '100%', 'stop-color': '#8b7bff' }))),
-        s('circle', { cx: 60, cy: 60, r: R, fill: 'none', stroke: 'var(--track)', 'stroke-width': 10 }),
-        s('circle', { cx: 60, cy: 60, r: R, fill: 'none', stroke: ringCol, 'stroke-width': 10, 'stroke-linecap': 'round', 'stroke-dasharray': `${(C * frac).toFixed(2)} ${C.toFixed(2)}` }));
-      return svg;
-    })(),
+    s('svg', { viewBox: '0 0 120 120' },
+      s('defs', null, s('linearGradient', { id: 'ringGrad', x1: '0', y1: '0', x2: '1', y2: '1' },
+        s('stop', { offset: '0%', 'stop-color': '#38d9ef' }), s('stop', { offset: '55%', 'stop-color': '#4ade80' }), s('stop', { offset: '100%', 'stop-color': '#8b7bff' }))),
+      s('circle', { cx: 60, cy: 60, r: R, fill: 'none', stroke: 'var(--track)', 'stroke-width': 10 }),
+      s('circle', { cx: 60, cy: 60, r: R, fill: 'none', stroke: ringCol, 'stroke-width': 10, 'stroke-linecap': 'round', 'stroke-dasharray': `${(C * frac).toFixed(2)} ${C.toFixed(2)}` })),
     h('div', { class: 'center' },
       h('div', { class: 'lbl' }, left < 0 ? 'Over budget' : 'Remaining'),
       h('div', { class: 'amt num ' + (left < 0 ? 'bad' : '') }, moneyW(Math.abs(left))),
@@ -785,12 +799,9 @@ function viewHome() {
       h('div', { class: 'tile-note ' + (st === 'over' ? 'over' : '') },
         !c.budget ? (sp ? 'No budget set' : 'No budget') : st === 'over' ? `Over by ${moneyW(sp - c.budget)}` : `${moneyW(c.budget - sp)} left`));
   });
-  if (byCat[null] || Object.keys(byCat).some((k) => k !== 'null' && !p.cats.find((c) => c.id === k))) {
-    const other = list.filter((t) => !p.cats.find((c) => c.id === t.cat));
-    const sp = spentOf(other);
-    if (sp) tiles.push(h('button', { class: 'tile', style: { '--c': '#94a3b8' }, onclick: () => { S.tab = 'activity'; S.filter = 'none'; render(); } },
-      h('div', { class: 'tile-top' }, h('span', { class: 'tile-ico' }, icon('box'))), h('span', { class: 'tile-name' }, 'Uncategorized'), h('div', { class: 'tile-amt' }, moneyW(sp))));
-  }
+  const otherSp = sum(list.filter((t) => !p.cats.find((c) => c.id === t.cat)));
+  if (otherSp) tiles.push(h('button', { class: 'tile', style: { '--c': '#94a3b8' }, onclick: () => { S.tab = 'activity'; S.filter = 'none'; render(); } },
+    h('div', { class: 'tile-top' }, h('span', { class: 'tile-ico' }, icon('box'))), h('span', { class: 'tile-name' }, 'Uncategorized'), h('div', { class: 'tile-amt' }, moneyW(otherSp))));
   out.push(h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h3', null, 'Spending'), h('button', { class: 'link-btn', onclick: () => openPlan() }, 'Edit plan')),
     h('div', { class: 'tiles' }, tiles)));
@@ -899,7 +910,7 @@ function viewActivity() {
     for (const t of items) { if (!groups.has(t.date)) groups.set(t.date, []); groups.get(t.date).push(t); }
     const target = dailyTarget(m);
     listWrap.replaceChildren(...[...groups].map(([d, l]) => {
-      const sp = spentOf(l);
+      const sp = sum(l);
       return h('div', { class: 'tx-group' },
         h('div', { class: 'tx-day' }, h('span', null, dayLabel(d)), h('span', { class: 'num ' + (sp > target ? 'bad' : '') }, money(sp))),
         h('div', { class: 'tx-list' }, l.map((t) => txRow(t))));
@@ -911,43 +922,50 @@ function viewActivity() {
     [{ id: '', name: 'All' }, ...p.cats, { id: 'zero', name: 'Zero Days' }, { id: 'none', name: 'Uncategorized' }].map((c) =>
       h('button', { class: 'chip', 'aria-pressed': String(S.filter === c.id), onclick: (e) => { S.filter = c.id; for (const b of chips.children) b.setAttribute('aria-pressed', String(b === e.currentTarget)); draw(); } }, c.name)));
   draw();
-  const total = spentOf(txOf(m));
+  const total = sum(txOf(m));
   return [h('div', { class: 'between' }, h('h2', null, 'Activity'), h('span', { class: 'small muted num' }, `${txOf(m).filter((t) => !t.zero).length} entries · ${moneyW(total)}`)), search, chips, listWrap];
 }
 
 /* ---------- Wallet */
 function viewWallet() {
   const m = S.month, t = todayStr(), c = D.cash;
-  if (c.A === null) {
+  if (!cashOn()) {
     return [h('h2', null, 'Cash'), h('div', { class: 'card' }, h('div', { class: 'empty' },
-      h('div', null, 'Set your monthly money and the amount you get on the 1st to see your cash schedule.'),
-      h('button', { class: 'btn btn-primary btn-sm', onclick: () => openSetup() }, 'Set up cash')))];
+      h('div', null, 'Add what you get on the 1st of each month and every 7 days to track the cash in your hand.'),
+      h('button', { class: 'btn btn-primary btn-sm', onclick: openSettings }, 'Set up cash')))];
   }
-  const { pays, received, spent, balance } = cashFor(m);
+  const pays = monthPays(m), isFuture = m > thisMonth();
   const out = [h('div', { class: 'between' }, h('h2', null, 'Cash'), h('button', { class: 'link-btn', onclick: openSettings }, 'Edit amounts'))];
-  const isFuture = m > thisMonth();
-  out.push(h('div', { class: 'card cash-hero' },
-    h('div', { class: 'small', style: { fontWeight: '700' } }, isFuture ? `Expected in ${monthName(m, 'short')}` : `Cash left in ${monthName(m, 'short')}`),
-    h('div', { class: 'big ' + (balance < 0 ? 'bad' : '') }, isFuture ? moneyW(pays.reduce((a, p) => a + p.amount, 0)) : moneyW(balance)),
-    isFuture ? h('div', { class: 'small muted' }, `${pays.length} payments scheduled`)
-      : h('div', { class: 'small muted num' }, `Received ${moneyW(received)} · Spent ${moneyW(spent)}`),
-    (() => { const all = cashAllTime(); return all === null || m !== thisMonth() ? null : h('div', { class: 'tiny muted num' }, `Since you started: ${moneyW(all)} not spent`); })()));
 
-  const nb = nextB(t);
+  const now = balanceOn(t);
+  let sub;
+  if (isFuture) sub = `${moneyW(sum(pays))} coming in ${monthName(m, 'short')}`;
+  else if (monthEnd(m) < c.since) sub = `You started counting on ${niceDate(c.since, true)}`;
+  else {
+    const spent = sum(txOf(m).filter((x) => x.date >= c.since && x.date <= t));
+    sub = `${monthName(m, 'short')}: received ${moneyW(sum(pays.filter((p) => p.date <= t)))} · spent ${moneyW(spent)}`;
+    if (m < thisMonth()) sub += ` · ended with ${moneyW(balanceOn(monthEnd(m)))}`;
+  }
+  out.push(h('div', { class: 'card cash-hero' },
+    h('div', { class: 'small', style: { fontWeight: '700' } }, now === null ? 'Cash in hand' : 'Cash in hand now'),
+    h('div', { class: 'big ' + (now < 0 ? 'bad' : '') }, now === null ? '–' : moneyW(now)),
+    h('div', { class: 'small muted num' }, now === null ? `You start counting on ${niceDate(c.since, true)}` : sub)));
+
+  const nb = nextB(t > c.since ? t : c.since);
   if (nb) {
     const dd = daysBetween(t, nb);
     out.push(h('div', { class: 'card' }, h('div', { class: 'countdown' },
       h('div', { class: 'days' }, h('div', null, dd === 0 ? 'Now' : String(dd), dd === 0 ? null : h('small', null, dd === 1 ? 'DAY' : 'DAYS'))),
       h('div', { class: 'stack', style: { gap: '2px' } },
         h('div', { class: 'small muted', style: { fontWeight: '700' } }, dd === 0 ? 'B arrives today' : 'Next B payment'),
-        h('div', { style: { font: '800 1.35rem var(--font-display)' } }, moneyW(bAmount())),
-        h('div', { class: 'small muted' }, niceDate(nb, true) + (nb.slice(0, 7) !== thisMonth() ? '' : ''))))));
+        h('div', { style: { font: '800 1.35rem var(--font-display)' } }, moneyW(c.B)),
+        h('div', { class: 'small muted' }, niceDate(nb, true))))));
   }
 
   const b5 = pays.filter((p) => p.kind === 'B').length === 5;
   out.push(h('div', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', null, `${monthName(m)} schedule`), h('span', { class: 'small muted num' }, moneyW(pays.reduce((a, p) => a + p.amount, 0)))),
-    b5 ? h('div', { class: 'badge5' }, icon('star', 'ico-sm'), `5 B payments this month: ${moneyW(bAmount())} extra`) : null,
+    h('div', { class: 'card-head' }, h('h3', null, `${monthName(m)} schedule`), h('span', { class: 'small muted num' }, moneyW(sum(pays)))),
+    b5 ? h('div', { class: 'badge5' }, icon('star', 'ico-sm'), `5 B payments this month: ${moneyW(c.B)} more than a 4-week month`) : null,
     pays.length ? h('div', null, pays.map((p) => {
       const got = p.date <= t, isNext = p.kind === 'B' && p.date === nb;
       return h('div', { class: 'pay' },
@@ -955,39 +973,48 @@ function viewWallet() {
         h('div', { style: { flex: '1' } }, h('div', { style: { fontWeight: '700' } }, p.kind === 'A' ? 'Monthly amount (A)' : 'Weekly amount (B)'), h('div', { class: 'small muted' }, niceDate(p.date, true))),
         h('div', { class: 'stack', style: { gap: '3px', alignItems: 'flex-end' } }, h('b', { class: 'num' }, moneyW(p.amount)),
           h('span', { class: 'status ' + (got ? 'got' : isNext ? 'next' : '') }, got ? 'Received' : isNext ? 'Next' : 'Upcoming')));
-    })) : h('div', { class: 'empty' }, `Your cash schedule starts ${niceDate(c.start, true)}.`)));
+    })) : h('div', { class: 'empty' }, monthEnd(m) < c.since ? `You started counting on ${niceDate(c.since, true)}.` : 'No payments this month.')));
 
   const ahead = [1, 2, 3].map((k) => shiftMonth(thisMonth(), k));
   out.push(h('div', { class: 'card' }, h('h3', null, 'Coming months'),
     h('div', null, ahead.map((mm) => {
-      const n = bCount(mm);
+      const n = monthPays(mm).filter((p) => p.kind === 'B').length;
       return h('div', { class: 'pay' }, h('div', { style: { flex: '1', fontWeight: '700' } }, monthName(mm)),
-        h('span', { class: 'status ' + (n === 5 ? 'next' : '') }, `${n} × B`), h('b', { class: 'num' }, moneyW(payments(mm).reduce((a, p) => a + p.amount, 0))));
+        c.B ? h('span', { class: 'status ' + (n === 5 ? 'next' : '') }, `${n} × B`) : null, h('b', { class: 'num' }, moneyW(sum(monthPays(mm)))));
     })),
-    h('p', { class: 'tiny muted' }, `B = (${moneyW(c.X)} − ${moneyW(c.A)}) ÷ 4 = ${moneyW(bAmount())}, paid every 7 days from ${niceDate(c.start)}.`)));
+    h('p', { class: 'tiny muted' }, [c.A ? `A = ${moneyW(c.A)} on the 1st` : null, c.B ? `B = ${moneyW(c.B)} every 7 days` : null,
+      `counting from ${niceDate(c.since)} with ${moneyW(c.opening)} in hand`].filter(Boolean).join(' · ') + '. Fixed costs aren’t taken from cash.')));
   return out;
 }
 
 /* ---------- Stats */
+// Income, fixed costs, spending budget and what's left to save; just the budget when cash isn't set up
+function planRows(p, m) {
+  const inc = income(m);
+  if (inc === null) return [h('span', null, 'Spending budget'), h('b', null, moneyW(p.variable))];
+  const save = inc - fixedTotal(p) - p.variable;
+  return [
+    h('span', null, 'Income (A + B)'), h('b', null, moneyW(inc)),
+    h('span', null, 'Fixed costs'), h('b', null, '−' + moneyW(fixedTotal(p))),
+    h('span', null, 'Spending budget'), h('b', null, '−' + moneyW(p.variable)),
+    h('span', { class: 'total' }, 'Left to save'), h('b', { class: 'total ' + (save < 0 ? 'bad' : 'good') }, moneyW(save)),
+  ];
+}
 function viewStats() {
-  const m = S.month, p = planFor(m), list = txOf(m), spent = spentOf(list);
+  const m = S.month, p = planFor(m), list = txOf(m), spent = sum(list);
   const byCat = {};
   for (const t of list) byCat[t.cat] = (byCat[t.cat] || 0) + t.amount;
   const out = [h('h2', null, 'Stats')];
 
-  const fx = fixedTotal(p), savings = D.cash.X - fx - p.variable;
   out.push(h('div', { class: 'card' }, h('h3', null, `${monthName(m)} plan`),
     h('div', { class: 'kv' },
-      h('span', null, 'Monthly money'), h('b', null, moneyW(D.cash.X)),
-      h('span', null, 'Fixed costs'), h('b', null, '−' + moneyW(fx)),
-      h('span', null, 'Spending budget'), h('b', null, '−' + moneyW(p.variable)),
-      h('span', { class: 'total' }, 'Left to save'), h('b', { class: 'total ' + (savings < 0 ? 'bad' : 'good') }, moneyW(savings)),
+      ...planRows(p, m),
       h('span', null, 'Spent so far'), h('b', null, moneyW(spent)),
       h('span', null, 'Budget left'), h('b', { class: spent > p.variable ? 'bad' : '' }, moneyW(p.variable - spent)))));
 
   // Donut
   const parts = p.cats.map((c) => ({ name: c.name, col: colorOf(c.color), v: Math.max(0, byCat[c.id] || 0) })).filter((x) => x.v > 0);
-  const otherV = Math.max(0, spentOf(list.filter((t) => !p.cats.find((c) => c.id === t.cat))));
+  const otherV = Math.max(0, sum(list.filter((t) => !p.cats.find((c) => c.id === t.cat))));
   if (otherV) parts.push({ name: 'Uncategorized', col: '#94a3b8', v: otherV });
   const tot = parts.reduce((a, x) => a + x.v, 0);
   if (tot) {
@@ -1064,9 +1091,8 @@ function avgChart(m) {
 }
 
 /* =================================================================== add / edit sheet */
-let edit = null, txKind = 'spend', txCat = null;
+let txKind = 'spend', txCat = null;
 function openTx(t) {
-  edit = t || null;
   if (t && t.zero) return openZero(t);
   const m = t ? t.date.slice(0, 7) : S.month;
   const p = planFor(m);
@@ -1075,7 +1101,7 @@ function openTx(t) {
   const defDate = t ? t.date : S.month === thisMonth() ? todayStr() : `${S.month}-01`;
   const f = $('#txForm');
   const amount = h('input', { id: 'txAmount', class: 'amount-input num', inputmode: 'decimal', autocomplete: 'off', placeholder: '0', value: t ? centsIn(Math.abs(t.amount)) : '', 'aria-label': 'Amount' });
-  const note = h('input', { id: 'txNote', maxlength: '80', placeholder: 'Note (optional), e.g. 7-11, MRT', value: t ? t.note || '' : '' });
+  const note = h('input', { id: 'txNote', maxlength: '80', placeholder: 'Note (optional), e.g. coffee, bus', value: t ? t.note || '' : '' });
   const date = h('input', { id: 'txDate', type: 'date', value: defDate, 'aria-label': 'Date' });
   const err = h('p', { class: 'error', role: 'alert' });
   const seg = h('div', { class: 'seg' }, ['spend', 'refund'].map((k) => h('button', {
@@ -1100,7 +1126,7 @@ function openTx(t) {
     const c = parseAmount(amount.value);
     if (!c) { err.textContent = 'Enter an amount, like 45 or 120.50.'; amount.focus(); return; }
     if (!txCat) { err.textContent = 'Pick a category.'; return; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date.value)) { err.textContent = 'Pick a date.'; return; }
+    if (!isDate(date.value)) { err.textContent = 'Pick a date.'; return; }
     const tx = { id: t ? t.id : uid('t'), date: date.value, note: note.value.trim(), cat: txCat, amount: txKind === 'refund' ? -c : c, created: t ? t.created : Date.now() };
     if (t) removeTx(t);
     const nm = tx.date.slice(0, 7);
@@ -1121,6 +1147,7 @@ async function deleteTx(t) {
   removeTx(t); commit(); toast('Deleted');
 }
 function logZero(date) {
+  if (!isDate(date)) { toast('Pick a date first.'); return; }
   const m = date.slice(0, 7);
   const same = txOf(m).filter((x) => x.date === date);
   if (same.some((x) => x.zero)) { toast(`${dayLabel(date)} is already a Zero Day`); return; }
@@ -1145,7 +1172,7 @@ function openPlan() {
   const body = $('#planBody');
   let openPicker = null;
   const draw = () => {
-    const sum = catsTotal(draft), diff = draft.variable - sum;
+    const assigned = catsTotal(draft), diff = draft.variable - assigned;
     const variable = h('input', { id: 'planVariable', inputmode: 'decimal', value: centsIn(draft.variable), 'aria-label': 'Monthly spending budget' });
     variable.addEventListener('change', () => { const c = parseAmount(variable.value); if (c !== null) draft.variable = c; else variable.value = centsIn(draft.variable); draw(); });
     const cats = draft.cats.map((c, i) => {
@@ -1171,7 +1198,6 @@ function openPlan() {
       amt.addEventListener('change', () => { const v = parseAmount(amt.value); if (v !== null) f.amount = v; draw(); });
       return h('div', { class: 'fixed-line' }, name, amt, h('button', { class: 'x-btn', type: 'button', 'aria-label': `Remove ${f.name}`, onclick: () => { draft.fixed.splice(i, 1); draw(); } }, '✕'));
     });
-    const savings = D.cash.X - fixedTotal(draft) - draft.variable;
     body.replaceChildren(
       h('div', { class: 'grab' }),
       h('div', { class: 'between' }, h('h2', null, `Plan from ${monthName(m)}`), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => $('#planSheet').close() }, '✕')),
@@ -1180,15 +1206,11 @@ function openPlan() {
       h('div', { class: 'section-label' }, 'Categories'),
       ...cats,
       h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { const used = new Set(draft.cats.map((c) => c.color)); draft.cats.push({ id: uid('c'), name: 'New category', type: 'want', budget: 0, icon: 'gift', color: Object.keys(COLORS).find((k) => !used.has(k)) || 'teal' }); draw(); } }, '+ Add category'),
-      h('div', { class: 'checkline ' + (diff === 0 ? 'good' : 'warn') }, diff === 0 ? `✓ Categories add up to ${moneyW(sum)}` : diff > 0 ? `Categories add up to ${moneyW(sum)}: ${moneyW(diff)} not assigned yet` : `Categories add up to ${moneyW(sum)}: ${moneyW(-diff)} more than your budget`),
+      h('div', { class: 'checkline ' + (diff === 0 ? 'good' : 'warn') }, diff === 0 ? `✓ Categories add up to ${moneyW(assigned)}` : diff > 0 ? `Categories add up to ${moneyW(assigned)}: ${moneyW(diff)} not assigned yet` : `Categories add up to ${moneyW(assigned)}: ${moneyW(-diff)} more than your budget`),
       h('div', { class: 'section-label' }, 'Fixed costs'),
       ...fixed,
       h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { draft.fixed.push({ id: uid('f'), name: 'New cost', amount: 0, icon: 'home' }); draw(); } }, '+ Add fixed cost'),
-      h('div', { class: 'kv card', style: { boxShadow: 'none' } },
-        h('span', null, 'Monthly money'), h('b', null, moneyW(D.cash.X)),
-        h('span', null, 'Fixed costs'), h('b', null, '−' + moneyW(fixedTotal(draft))),
-        h('span', null, 'Spending budget'), h('b', null, '−' + moneyW(draft.variable)),
-        h('span', { class: 'total' }, 'Left to save'), h('b', { class: 'total ' + (savings < 0 ? 'bad' : 'good') }, moneyW(savings))),
+      cashOn() ? h('div', { class: 'kv card', style: { boxShadow: 'none' } }, ...planRows(draft, m)) : null,
       h('button', { class: 'btn btn-primary btn-block', type: 'button', onclick: () => {
         document.activeElement && document.activeElement.blur();
         setTimeout(() => {
@@ -1202,21 +1224,42 @@ function openPlan() {
 }
 
 /* =================================================================== settings & setup */
+// Cash inputs shared by Settings and the welcome sheet. read() returns the new cash setup, null when the amounts are blank, or an error message.
+function cashFields() {
+  const c = D.cash, on = cashOn();
+  const A = h('input', { inputmode: 'decimal', value: on && c.A ? centsIn(c.A) : '', placeholder: '0' });
+  const B = h('input', { inputmode: 'decimal', value: on && c.B ? centsIn(c.B) : '', placeholder: '0' });
+  const start = h('input', { type: 'date', value: c.start || '' });
+  const opening = h('input', { inputmode: 'decimal', value: on ? centsIn(c.opening) : '', placeholder: '0' });
+  const since = h('input', { type: 'date', value: c.since || todayStr() });
+  const fields = [
+    h('label', { class: 'field' }, 'Amount on the 1st of each month (A)', A),
+    h('label', { class: 'field' }, 'Amount every 7 days (B)', B),
+    h('label', { class: 'field' }, 'Date of any B payment', start),
+    h('div', { class: 'row' }, h('label', { class: 'field', style: { flex: '1' } }, 'Cash in hand', opening), h('label', { class: 'field', style: { flex: '1' } }, 'On the morning of', since)),
+    h('p', { class: 'tiny muted' }, 'Count what you have before any payment that day; payments and spending from then on are added up for you. Leave the three amounts blank to stop tracking cash.'),
+  ];
+  const read = () => {
+    const blank = (el) => el.value.trim() === '';
+    if (blank(A) && blank(B) && blank(opening)) return null;
+    const [a, b, o] = [A, B, opening].map((el) => (blank(el) ? 0 : parseAmount(el.value)));
+    if (a === null || b === null || o === null) return 'Amounts must be numbers, like 8000 or 1250.50.';
+    if (b && !isDate(start.value)) return 'Pick the date of a B payment.';
+    if (!isDate(since.value)) return 'Pick the day you start counting from.';
+    return { A: a, B: b, start: b ? start.value : null, since: since.value, opening: o };
+  };
+  return { fields, read };
+}
+
 function openSettings() {
   const body = $('#settingsBody');
-  const c = D.cash;
   const theme = h('div', { class: 'seg' }, [['dark', 'Dark'], ['light', 'Light'], ['system', 'Auto']].map(([k, l]) =>
     h('button', { type: 'button', 'aria-pressed': String(D.settings.theme === k), onclick: () => { D.settings.theme = k; persist(); applyTheme(); openSettings(); } }, l)));
   const gameSw = h('button', { class: 'switch', type: 'button', role: 'switch', 'aria-checked': String(D.settings.game), 'aria-label': 'Game mode',
     onclick: () => { D.settings.game = !D.settings.game; persist(); render(); openSettings(); } });
-  const X = h('input', { id: 'setX', inputmode: 'decimal', value: centsIn(c.X) });
-  const A = h('input', { id: 'setA', inputmode: 'decimal', value: centsIn(c.A), placeholder: 'e.g. 8000' });
-  const start = h('input', { id: 'setStart', type: 'date', value: c.start });
-  const bPrev = h('p', { class: 'small muted num' });
-  const upd = () => { const x = parseAmount(X.value), a = parseAmount(A.value); bPrev.textContent = x !== null && a !== null && a <= x ? `B = ${money(Math.round((x - a) / 4))} every 7 days` : 'B is worked out from these.'; };
-  X.addEventListener('input', upd); A.addEventListener('input', upd); upd();
+  const cur = h('input', { value: D.settings.currency, maxlength: '3', autocapitalize: 'characters' });
+  const cash = cashFields();
   const err = h('p', { class: 'error' });
-  const cur = h('input', { id: 'setCur', value: D.settings.currency, maxlength: '3', autocapitalize: 'characters', style: { width: '90px' } });
   body.replaceChildren(
     h('div', { class: 'grab' }),
     h('div', { class: 'between' }, h('h2', null, 'Settings'), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => $('#settingsSheet').close() }, '✕')),
@@ -1224,57 +1267,55 @@ function openSettings() {
     theme,
     h('div', { class: 'between' }, h('div', null, h('div', { style: { fontWeight: '700' } }, 'Game mode'), h('div', { class: 'small muted' }, 'Streaks, levels, weekly stars and achievements')), gameSw),
     h('div', { class: 'section-label' }, 'Money'),
-    h('label', { class: 'field' }, 'Monthly money (X)', X),
-    h('label', { class: 'field' }, 'Amount on the 1st (A)', A),
-    h('label', { class: 'field' }, 'First B payment date', start),
-    bPrev, err,
-    h('div', { class: 'row' }, h('label', { class: 'field', style: { flex: 'none' } }, 'Currency', cur), h('span', { class: 'spacer' }),
-      h('button', { class: 'btn btn-primary', type: 'button', onclick: () => {
-        const x = parseAmount(X.value), a = parseAmount(A.value), code = cur.value.trim().toUpperCase();
-        if (x === null || !x) { err.textContent = 'Enter your monthly money.'; return; }
-        if (a === null || a > x) { err.textContent = 'A must be a number no bigger than X.'; return; }
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(start.value)) { err.textContent = 'Pick the first B date.'; return; }
-        try { new Intl.NumberFormat(undefined, { style: 'currency', currency: code }); } catch { err.textContent = 'Use a 3-letter currency code like THB.'; return; }
-        Object.assign(D.cash, { X: x, A: a, start: start.value }); D.settings.currency = code; setCurrency(code);
-        commit(); err.textContent = ''; toast('Saved');
-      } }, 'Save')),
+    h('label', { class: 'field' }, 'Currency (3-letter code, like USD or THB)', cur),
+    ...cash.fields,
+    err,
+    h('button', { class: 'btn btn-primary btn-block', type: 'button', onclick: () => {
+      const code = cur.value.trim().toUpperCase(), next = cash.read();
+      if (!validCurrency(code)) { err.textContent = 'Use a 3-letter currency code like USD or THB.'; return; }
+      if (typeof next === 'string') { err.textContent = next; return; }
+      D.cash = next || freshData().cash; D.settings.currency = code; setCurrency(code);
+      commit(); err.textContent = ''; toast('Saved');
+    } }, 'Save'),
     h('div', { class: 'section-label' }, 'Plan'),
     h('button', { class: 'btn btn-block', type: 'button', onclick: () => { $('#settingsSheet').close(); openPlan(); } }, `Edit budget & categories (${monthName(S.month)})`),
     h('div', { class: 'section-label' }, 'Backup'),
-    h('p', { class: 'small muted' }, (D.settings.lastBackup ? `Last backup ${new Date(D.settings.lastBackup).toLocaleDateString()}. ` : 'No backup yet. ') + 'Everything is saved on this phone only. Restoring replaces what’s here.'),
+    h('p', { class: 'small muted' }, (D.settings.lastBackup ? `Last backup ${new Date(D.settings.lastBackup).toLocaleDateString()}. ` : 'No backup yet. ') + 'Everything is saved on this device only. Restoring replaces what’s here.'),
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: exportBackup }, 'Save backup'), h('button', { class: 'btn', type: 'button', onclick: () => $('#importFile').click() }, 'Restore…')));
   if (!$('#settingsSheet').open) $('#settingsSheet').showModal();
 }
 
 function openSetup() {
   const f = $('#setupForm');
-  const c = D.cash;
-  const X = h('input', { id: 'suX', inputmode: 'decimal', value: centsIn(c.X) });
-  const A = h('input', { id: 'suA', inputmode: 'decimal', value: centsIn(c.A), placeholder: 'e.g. 8000' });
-  const start = h('input', { id: 'suStart', type: 'date', value: c.start });
-  const bPrev = h('div', { class: 'checkline num' });
-  const upd = () => { const x = parseAmount(X.value), a = parseAmount(A.value); bPrev.textContent = x !== null && a !== null && a <= x ? `B = (X − A) ÷ 4 = ${money(Math.round((x - a) / 4))}, every 7 days` : 'B = (X − A) ÷ 4'; };
-  X.addEventListener('input', upd); A.addEventListener('input', upd); upd();
-  const err = h('p', { class: 'error' });
+  const cur = h('input', { maxlength: '3', autocapitalize: 'characters', placeholder: 'e.g. USD, THB, EUR' });
+  const budget = h('input', { inputmode: 'decimal', placeholder: '0' });
+  const cash = cashFields();
+  const err = h('p', { class: 'error', role: 'alert' });
+  const finish = (variable) => {
+    if (!Object.keys(D.plans).length) D.plans[thisMonth()] = { ...clone(DEFAULT_PLAN), variable };
+    D.settings.setupDone = true;
+    $('#setupSheet').close();
+  };
   f.replaceChildren(
     h('div', { class: 'grab' }),
     h('div', { class: 'row' }, h('span', { class: 'level-badge', style: { width: '44px', height: '44px', borderRadius: '14px' } }, icon('wallet')), h('h2', null, 'Welcome to Pocket Budget')),
-    h('p', { class: 'muted small' }, 'Your budget from your spreadsheet is already filled in (rent, phone, 6,000 spending budget and your six categories). You can change it any time. First, your cash:'),
-    h('label', { class: 'field' }, 'Money you get each month (X)', X),
-    h('label', { class: 'field' }, 'Amount you get on the 1st (A)', A),
-    h('label', { class: 'field' }, 'Date of your first B payment', start),
-    bPrev, err,
+    h('p', { class: 'muted small' }, 'A few basics to get started. You can change all of this later in Settings and Edit plan.'),
+    h('label', { class: 'field' }, 'Currency', cur),
+    h('label', { class: 'field' }, 'Monthly spending budget', budget),
+    h('div', { class: 'section-label' }, 'Cash (optional)'),
+    ...cash.fields,
+    err,
     h('button', { class: 'btn btn-primary btn-block', type: 'submit' }, 'Start'),
-    h('button', { class: 'btn btn-block', type: 'button', onclick: () => { D.settings.setupDone = true; persist(); $('#setupSheet').close(); render(); } }, 'Skip for now'));
+    h('button', { class: 'btn btn-block', type: 'button', onclick: () => { finish(0); commit(); } }, 'Skip for now'));
   f.onsubmit = (e) => {
     e.preventDefault();
-    const x = parseAmount(X.value), a = parseAmount(A.value);
-    if (!x) { err.textContent = 'Enter how much you get each month.'; return; }
-    if (a === null || a > x) { err.textContent = 'Enter A: a number no bigger than X.'; return; }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(start.value)) { err.textContent = 'Pick the date of your first B payment.'; return; }
-    Object.assign(D.cash, { X: x, A: a, start: start.value });
-    D.settings.setupDone = true;
-    $('#setupSheet').close(); commit(); toast('All set');
+    const code = cur.value.trim().toUpperCase(), v = budget.value.trim() === '' ? 0 : parseAmount(budget.value), next = cash.read();
+    if (!validCurrency(code)) { err.textContent = 'Enter a 3-letter currency code like USD or THB.'; cur.focus(); return; }
+    if (v === null) { err.textContent = 'Enter your budget as a number, like 6000.'; return; }
+    if (typeof next === 'string') { err.textContent = next; return; }
+    D.settings.currency = code; setCurrency(code);
+    if (next) D.cash = next;
+    finish(v); commit(); toast('All set');
   };
   $('#setupSheet').showModal();
 }
@@ -1304,11 +1345,12 @@ $('#importFile').addEventListener('change', async (e) => {
   if (!file) return;
   let d;
   try { d = JSON.parse(await file.text()); } catch { toast('That file isn’t a Pocket Budget backup.'); return; }
-  if (!d || d.app !== 'pocket-budget' || !d.data || d.data.v !== 2) { toast('That file isn’t a Pocket Budget backup.'); return; }
-  const n = Object.values(d.data.tx || {}).flat().length;
+  const data = d && d.app === 'pocket-budget' ? normalize(d.data) : null;
+  if (!data) { toast('That file isn’t a Pocket Budget backup.'); return; }
+  const n = Object.values(data.tx).flat().length;
   if ($('#settingsSheet').open) $('#settingsSheet').close();
-  if (!(await askConfirm(`Restore the backup from ${new Date(d.exported).toLocaleDateString()} (${n} entries)? This replaces everything on this phone.`, 'Restore'))) return;
-  D = Object.assign(freshData(), d.data);
+  if (!(await askConfirm(`Restore the backup from ${new Date(d.exported).toLocaleDateString()} (${n} entries)? This replaces everything on this device.`, 'Restore'))) return;
+  D = data;
   setCurrency(D.settings.currency); applyTheme(); commit();
   toast(`Restored ${n} entries`);
 });
