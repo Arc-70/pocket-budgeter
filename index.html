@@ -168,6 +168,7 @@ main.wrap { padding-block: 14px 100px; display: flex; flex-direction: column; ga
 
 .empty { text-align: center; color: var(--muted); padding: 16px 8px; font-size: .9rem; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .notice { padding: 12px 14px; border-radius: 10px; font-size: .88rem; background: var(--gold-soft); border: 1px solid color-mix(in srgb, var(--gold) 30%, transparent); }
+.notice.topup { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 
 /* Buttons & inputs */
 .btn { font: inherit; font-weight: 600; min-height: 44px; padding: 0 16px; border-radius: 8px; cursor: pointer; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
@@ -569,6 +570,28 @@ function viewHome() {
       h('button', { class: 'link-btn', onclick: exportBackup }, 'Save backup')));
   }
 
+  // Top-up reminder: an A or B payment is due today
+  const t = todayStr(), due = payments(t, t);
+  if (due.length) {
+    out.push(h('div', { class: 'notice topup' }, h('b', null, 'Top-up day. '),
+      `${due.map((x) => `${x.kind} (${moneyW(x.amount)})`).join(' and ')} ${due.length > 1 ? 'are' : 'is'} due today. `,
+      h('button', { class: 'link-btn', onclick: () => { S.tab = 'wallet'; S.month = thisMonth(); render(); } }, 'See cash')));
+  }
+
+  // Today: what's left of the month split evenly over the days left, minus what's been spent today
+  if (isNow) {
+    const spentToday = sum(list.filter((x) => x.date === t));
+    const allowance = Math.max(0, Math.round((budget - sum(list.filter((x) => x.date < t))) / (n - dayNum + 1)));
+    const leftToday = allowance - spentToday;
+    out.push(h('div', { class: 'card' },
+      h('div', null,
+        h('div', { class: 'small muted' }, `Today, ${niceDate(t, true)}`),
+        h('div', { class: 'big ' + (leftToday < 0 ? 'bad' : '') }, moneyW(Math.abs(leftToday))),
+        h('div', { class: 'small muted num' }, `${leftToday < 0 ? 'over today’s budget' : 'left to spend today'} · ${moneyW(spentToday)} spent of ${moneyW(allowance)}`)),
+      h('div', { class: 'meter' }, h('i', { class: statusOf(spentToday, allowance), style: { width: (allowance ? Math.min(100, (spentToday / allowance) * 100) : spentToday > 0 ? 100 : 0) + '%' } })),
+      h('p', { class: 'tiny muted' }, 'Worked out each day from what’s left this month divided by the days left, including today.')));
+  }
+
   // Month summary
   const avg = dayNum ? Math.round(spent / dayNum) : 0, target = dailyTarget(m);
   const pct = budget ? Math.min(100, (spent / budget) * 100) : spent > 0 ? 100 : 0;
@@ -582,7 +605,7 @@ function viewHome() {
     h('div', { class: 'figures' },
       h('div', null, h('span', { class: 'tiny muted' }, 'Average a day'), h('b', { class: dayNum && avg > target ? 'bad' : '' }, dayNum ? moneyW(avg) : '–')),
       h('div', null, h('span', { class: 'tiny muted' }, 'Target a day'), h('b', null, moneyW(target))),
-      isNow ? h('div', null, h('span', { class: 'tiny muted' }, 'Left a day'), h('b', null, moneyW(Math.max(0, Math.round(left / (n - dayNum + 1))))))
+      isNow ? h('div', null, h('span', { class: 'tiny muted' }, 'Days left'), h('b', null, String(n - dayNum + 1)))
         : h('div', null, h('span', { class: 'tiny muted' }, 'Entries'), h('b', null, String(list.filter((t) => !t.zero).length))))));
 
   // Categories
@@ -685,7 +708,7 @@ function viewWallet() {
       h('button', { class: 'btn btn-primary btn-sm', onclick: openSettings }, 'Set up cash')))];
   }
   const pays = monthPays(m), isFuture = m > thisMonth();
-  const out = [h('div', { class: 'between' }, h('h2', null, 'Cash'), h('button', { class: 'link-btn', onclick: openSettings }, 'Edit amounts'))];
+  const out = [h('div', { class: 'between' }, h('h2', null, 'Cash'), h('button', { class: 'link-btn', onclick: openSettings }, 'Edit balance & amounts'))];
 
   const now = balanceOn(t);
   let sub;
@@ -984,11 +1007,12 @@ function cashFields() {
   const opening = h('input', { inputmode: 'decimal', value: on ? centsIn(c.opening) : '', placeholder: '0' });
   const since = h('input', { type: 'date', value: c.since || todayStr() });
   const fields = [
+    h('div', { class: 'row' }, h('label', { class: 'field', style: { flex: '1' } }, 'Starting cash balance', opening), h('label', { class: 'field', style: { flex: '1' } }, 'As of', since)),
+    h('p', { class: 'tiny muted' }, 'The cash you had on that date, before any A or B payment that day. Payments and spending from then on are added up for you.'),
     h('label', { class: 'field' }, 'Amount on the 1st of each month (A)', A),
     h('label', { class: 'field' }, 'Amount every 7 days (B)', B),
     h('label', { class: 'field' }, 'Date of any B payment', start),
-    h('div', { class: 'row' }, h('label', { class: 'field', style: { flex: '1' } }, 'Cash in hand', opening), h('label', { class: 'field', style: { flex: '1' } }, 'On the morning of', since)),
-    h('p', { class: 'tiny muted' }, 'Count what you have before any payment that day; payments and spending from then on are added up for you. Leave the three amounts blank to stop tracking cash.'),
+    h('p', { class: 'tiny muted' }, 'Leave the balance and both amounts blank to stop tracking cash.'),
   ];
   const read = () => {
     const blank = (el) => el.value.trim() === '';
@@ -1124,7 +1148,18 @@ for (const d of document.querySelectorAll('dialog')) {
   });
 }
 $('#setupSheet').addEventListener('cancel', (e) => e.preventDefault());
-document.addEventListener('visibilitychange', () => { if (!document.hidden && !document.querySelector('dialog[open]')) render(); });
+// "Today" always comes from the phone's clock. If the date changes while the app is open (past midnight, or the
+// phone's date is corrected), follow it: move on to the new month if that one was showing, then redraw.
+let shownDay = todayStr();
+function checkDay() {
+  const t = todayStr();
+  if (t === shownDay) return;
+  if (S.month === shownDay.slice(0, 7)) S.month = t.slice(0, 7);
+  shownDay = t;
+  if (!document.querySelector('dialog[open]')) render();
+}
+setInterval(checkDay, 30000);
+document.addEventListener('visibilitychange', () => { if (document.hidden) return; checkDay(); if (!document.querySelector('dialog[open]')) render(); });
 
 applyTheme();
 render();

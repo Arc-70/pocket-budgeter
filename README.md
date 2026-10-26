@@ -5,6 +5,8 @@ Your data is saved on the device you use it on and never leaves it unless you sa
 
 **What's inside**
 
+- **Today:** how much you have left to spend today. Each morning it takes what's left of the month's budget and divides it
+  by the days left (including today), then subtracts what you've logged today.
 - **Monthly plan:** a spending budget split into Need/Want categories, plus fixed costs (rent, phone…) you tick off as paid.
   A plan carries into the following months until you change it; earlier months keep their own plan.
 - **Quick logging:** spending, refunds and Zero Days (days you spent nothing). After adding, editing or deleting an entry,
@@ -23,14 +25,19 @@ You can get money in two independent ways, and you can use either or both:
 - **A:** a set amount on the 1st of every month.
 - **B:** a set amount every 7 days, counted from any date you got a B payment.
 
-**Cash in hand** = the cash you had on the day you started counting + every A and B payment since − everything you've logged since.
+**Cash in hand** = your starting cash balance + every A and B payment since its date − everything you've logged since.
 It's one running balance, so money you don't spend in one month carries into the next.
 Because B comes weekly, some months have 5 B payments instead of 4; the Cash tab shows these, and the next three months.
 
 Fixed costs are treated as paid from somewhere else, so they don't come out of your cash. They do show up in the monthly plan:
 *income (A + B) − fixed costs − spending budget = left to save.*
 
-Set or change the amounts in **Settings → Money**. Leave all three amounts blank to stop tracking cash.
+On days an A or B payment is due, Home shows a **Top-up day** note.
+
+Set your starting cash balance (and the date it applies to) and the A and B amounts in **Settings → Money**, or from **Edit balance & amounts** on the Cash tab.
+Leave the balance and both amounts blank to stop tracking cash.
+
+The app takes today's date from your phone's clock, in your local time zone. If it's left open past midnight, it moves on to the new day by itself.
 
 ## Hosting it (GitHub Pages)
 
@@ -65,7 +72,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v5` to `pocket-budget-v6`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v6` to `pocket-budget-v7`) so devices pick up the new version.
 Open the app twice after updating: the first open downloads the update, the second shows it.
 
 ## Files
