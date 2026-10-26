@@ -585,7 +585,7 @@ const poolHow = (date) => {
 function poolCard() {
   const t = todayStr(), P = D.pool;
   const head = h('div', { class: 'card-head' }, h('h3', null, 'Spending pool'), P.start ? h('button', { class: 'link-btn', onclick: openSettings }, 'Change') : null);
-  if (!D.cash.A && !D.cash.B) {
+  if (!P.start && !D.cash.A && !D.cash.B) {
     return h('div', { class: 'card' }, head,
       h('p', { class: 'small muted' }, 'A pool you can spend from that grows a little every day from your A and B payments. Add your A and B amounts to start one.'),
       h('button', { class: 'btn btn-sm', onclick: openSettings }, 'Add A and B'));
@@ -627,7 +627,7 @@ function poolMonthCard(m) {
 // Settings section
 function poolSettings() {
   const P = D.pool, out = [h('div', { class: 'section-label' }, 'Spending pool')];
-  if (!D.cash.A && !D.cash.B) return [...out, h('p', { class: 'small muted' }, 'Add your A and B amounts above to use a spending pool.')];
+  if (!P.start && !D.cash.A && !D.cash.B) return [...out, h('p', { class: 'small muted' }, 'Add your A and B amounts above to use a spending pool.')];
   const picker = poolPicker();
   out.push(h('p', { class: 'small muted' }, P.start ? `Running since ${niceDate(P.start, true)}. Restarting sets it back to ${moneyW(0)} on the payday you pick.` : 'Not started. Pick the payday it starts on, at 0.'),
     picker,
