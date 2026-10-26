@@ -1,5 +1,5 @@
 // Keeps Pocket Budget working offline. Bump VERSION when you change any file.
-const VERSION = 'pocket-budget-v2';
+const VERSION = 'pocket-budget-v6';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon.svg', './icon-180.png', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {
@@ -13,7 +13,7 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(caches.open(VERSION).then(async (cache) => {
     const cached = await cache.match(e.request, { ignoreSearch: true });
-    const fresh = fetch(e.request).then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; }).catch(() => cached);
+    const fresh = fetch(e.request).then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; }).catch(() => cached || Response.error());
     return cached || fresh;
   }));
 });
