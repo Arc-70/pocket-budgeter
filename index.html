@@ -1017,13 +1017,23 @@ function cashFields() {
   const read = () => {
     const blank = (el) => el.value.trim() === '';
     if (blank(A) && blank(B) && blank(opening)) return null;
-    const [a, b, o] = [A, B, opening].map((el) => (blank(el) ? 0 : parseAmount(el.value)));
-    if (a === null || b === null || o === null) return 'Amounts must be numbers, like 8000 or 1250.50.';
+    const [a, b] = [A, B].map((el) => (blank(el) ? 0 : parseAmount(el.value)));
+    if (a === null || b === null) return 'A and B must be numbers, like 8000 or 1250.50.';
+    // the starting balance may be below zero
+    const ov = opening.value.trim(), minus = /^[-−]/.test(ov), o = blank(opening) ? 0 : parseAmount(ov.replace(/^[-−]/, ''));
+    if (o === null) return 'The starting cash balance must be a number, like 1500 or -200.';
     if (b && !isDate(start.value)) return 'Pick the date of a B payment.';
     if (!isDate(since.value)) return 'Pick the day you start counting from.';
-    return { A: a, B: b, start: b ? start.value : null, since: since.value, opening: o };
+    return { A: a, B: b, start: b ? start.value : null, since: since.value, opening: minus ? -o : o };
   };
   return { fields, read };
+}
+
+// Shows a form error where it can't be missed: next to the button, scrolled into view, and as a message at the bottom
+function showError(err, msg) {
+  err.textContent = msg;
+  err.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  toast(msg);
 }
 
 function openSettings() {
@@ -1033,6 +1043,7 @@ function openSettings() {
   const cur = h('input', { value: D.settings.currency, maxlength: '3', autocapitalize: 'characters' });
   const cash = cashFields();
   const err = h('p', { class: 'error' });
+  const version = h('p', { class: 'tiny muted' });
   body.replaceChildren(
     h('div', { class: 'grab' }),
     h('div', { class: 'between' }, h('h2', null, 'Settings'), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => $('#settingsSheet').close() }, '✕')),
@@ -1044,8 +1055,8 @@ function openSettings() {
     err,
     h('button', { class: 'btn btn-primary btn-block', type: 'button', onclick: () => {
       const code = cur.value.trim().toUpperCase(), next = cash.read();
-      if (!validCurrency(code)) { err.textContent = 'Use a 3-letter currency code like USD or THB.'; return; }
-      if (typeof next === 'string') { err.textContent = next; return; }
+      if (!validCurrency(code)) return showError(err, 'Use a 3-letter currency code like USD or THB.');
+      if (typeof next === 'string') return showError(err, next);
       D.cash = next || freshData().cash; D.settings.currency = code; setCurrency(code);
       commit(); err.textContent = ''; toast('Saved');
     } }, 'Save'),
@@ -1053,7 +1064,10 @@ function openSettings() {
     h('button', { class: 'btn btn-block', type: 'button', onclick: () => { $('#settingsSheet').close(); openPlan(); } }, `Edit budget & categories (${monthName(S.month)})`),
     h('div', { class: 'section-label' }, 'Backup'),
     h('p', { class: 'small muted' }, (D.settings.lastBackup ? `Last backup ${new Date(D.settings.lastBackup).toLocaleDateString()}. ` : 'No backup yet. ') + 'Everything is saved on this device only. Restoring replaces what’s here.'),
-    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: exportBackup }, 'Save backup'), h('button', { class: 'btn', type: 'button', onclick: () => $('#importFile').click() }, 'Restore…')));
+    h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: exportBackup }, 'Save backup'), h('button', { class: 'btn', type: 'button', onclick: () => $('#importFile').click() }, 'Restore…')),
+    version);
+  // the offline cache is named after the app version in sw.js
+  if (window.caches) caches.keys().then((keys) => { const k = keys.find((x) => x.startsWith('pocket-budget-')); if (k) version.textContent = `App version ${k.slice('pocket-budget-'.length)}`; }).catch(() => {});
   if (!$('#settingsSheet').open) $('#settingsSheet').showModal();
 }
 
@@ -1082,9 +1096,9 @@ function openSetup() {
   f.onsubmit = (e) => {
     e.preventDefault();
     const code = cur.value.trim().toUpperCase(), v = budget.value.trim() === '' ? 0 : parseAmount(budget.value), next = cash.read();
-    if (!validCurrency(code)) { err.textContent = 'Enter a 3-letter currency code like USD or THB.'; cur.focus(); return; }
-    if (v === null) { err.textContent = 'Enter your budget as a number, like 6000.'; return; }
-    if (typeof next === 'string') { err.textContent = next; return; }
+    if (!validCurrency(code)) return showError(err, 'Enter a 3-letter currency code like USD or THB.');
+    if (v === null) return showError(err, 'Enter your budget as a number, like 6000.');
+    if (typeof next === 'string') return showError(err, next);
     D.settings.currency = code; setCurrency(code);
     if (next) D.cash = next;
     finish(v); commit(); toast('All set');
