@@ -72,7 +72,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v7` to `pocket-budget-v8`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v8` to `pocket-budget-v9`) so devices pick up the new version.
 When you're online the app always loads the newest version, so the update shows the next time you open it.
 If a home-screen app was only in the background, close it fully first. Settings shows which version is running.
 
