@@ -1,5 +1,5 @@
 // Keeps Pocket Budget working offline. Bump VERSION when you change any file.
-const VERSION = 'pocket-budget-v10';
+const VERSION = 'pocket-budget-v11';
 // The slip reader in vendor/ is big and rarely changes, so it has its own cache that survives app updates. Bump when vendor/ changes.
 const VENDOR = 'pocket-budget-vendor-1';
 // Slips shared to the app from the gallery wait here until the page picks them up

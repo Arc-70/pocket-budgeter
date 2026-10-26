@@ -446,7 +446,7 @@ const V2_PLAN = {
 function freshData() {
   return {
     v: 3,
-    settings: { currency: 'USD', theme: 'system', setupDone: false, lastBackup: 0 },
+    settings: { currency: 'USD', theme: 'system', setupDone: false, lastBackup: 0, budgetAuto: 1 },
     // A on the 1st of each month, B every 7 days from `start`; the running balance counts from `since`, with `opening` in hand that morning
     cash: { A: 0, B: 0, start: null, since: null, opening: 0 },
     plans: {},  // 'YYYY-MM' -> plan; a month without one uses the latest earlier plan
@@ -472,6 +472,13 @@ function normalize(d) {
     const c = d.cash || {};
     if (c.A !== null && c.A !== undefined && c.start) out.cash = { A: c.A, B: Math.round((c.X - c.A) / 4), start: c.start, since: `${c.start.slice(0, 7)}-01`, opening: 0 };
     if (!Object.keys(out.plans).length && (out.settings.setupDone || Object.keys(out.tx).length)) out.plans[Object.keys(out.tx).sort()[0] || thisMonth()] = clone(V2_PLAN);
+  }
+  // Once, for saves from before the budget could be automatic: switch the plan in use now to working it out from
+  // A and B, if they're set. Earlier plans keep their typed amounts; Edit plan can switch back to "Set my own".
+  if (!(d.settings && d.settings.budgetAuto)) {
+    const k = Object.keys(out.plans).filter((x) => x <= thisMonth()).sort().pop();
+    if (k && (out.cash.A || out.cash.B)) out.plans[k] = { ...out.plans[k], auto: true };
+    out.settings.budgetAuto = 1;
   }
   return out;
 }
@@ -500,7 +507,11 @@ function catInfo(id, m) {
 }
 const txOf = (m) => D.tx[m] || [];
 const sum = (list) => list.reduce((a, t) => a + (t.amount || 0), 0);
-const dailyTarget = (m) => Math.round(planFor(m).variable / daysIn(m));
+// The month's spending budget: worked out from your payments (A + B × days in the month ÷ 7, the same daily rate as
+// the spending pool) when the plan is set to Automatic, otherwise the amount you typed in
+const autoBudget = (m) => Math.round((D.cash.A || 0) + (D.cash.B || 0) * daysIn(m) / 7);
+const budgetOf = (m, p = planFor(m)) => (p.auto ? autoBudget(m) : p.variable);
+const dailyTarget = (m) => Math.round(budgetOf(m) / daysIn(m));
 const fixedTotal = (p) => p.fixed.reduce((a, f) => a + f.amount, 0);
 const catsTotal = (p) => p.cats.reduce((a, c) => a + c.budget, 0);
 
@@ -1002,7 +1013,7 @@ function statusOf(spent, budget) {
 /* ---------- Home */
 function viewHome() {
   const m = S.month, p = planFor(m), list = txOf(m);
-  const spent = sum(list), budget = p.variable, left = budget - spent;
+  const spent = sum(list), budget = budgetOf(m, p), left = budget - spent;
   const isNow = m === thisMonth(), n = daysIn(m);
   const dayNum = isNow ? Number(todayStr().slice(8)) : m < thisMonth() ? n : 0;
   const showCat = (id) => { S.tab = 'activity'; S.filter = id; render(); };
@@ -1199,12 +1210,13 @@ function viewWallet() {
 // Income, fixed costs, spending budget and what's left to save; just the budget when cash isn't set up
 function planRows(p, m) {
   const inc = income(m);
-  if (inc === null) return [h('span', null, 'Spending budget'), h('b', null, moneyW(p.variable))];
-  const save = inc - fixedTotal(p) - p.variable;
+  const bud = budgetOf(m, p);
+  if (inc === null) return [h('span', null, 'Spending budget'), h('b', null, moneyW(bud))];
+  const save = inc - fixedTotal(p) - bud;
   return [
     h('span', null, 'Income (A + B)'), h('b', null, moneyW(inc)),
     h('span', null, 'Fixed costs'), h('b', null, '−' + moneyW(fixedTotal(p))),
-    h('span', null, 'Spending budget'), h('b', null, '−' + moneyW(p.variable)),
+    h('span', null, 'Spending budget'), h('b', null, '−' + moneyW(bud)),
     h('span', { class: 'total' }, 'Left to save'), h('b', { class: 'total ' + (save < 0 ? 'bad' : 'good') }, moneyW(save)),
   ];
 }
@@ -1218,7 +1230,7 @@ function viewStats() {
     h('div', { class: 'kv' },
       ...planRows(p, m),
       h('span', null, 'Spent so far'), h('b', null, moneyW(spent)),
-      h('span', null, 'Budget left'), h('b', { class: spent > p.variable ? 'bad' : '' }, moneyW(p.variable - spent)))));
+      h('span', null, 'Budget left'), h('b', { class: spent > budgetOf(m, p) ? 'bad' : '' }, moneyW(budgetOf(m, p) - spent)))));
 
   // Where it went
   const parts = p.cats.map((c) => ({ name: c.name, col: colorOf(c.color), v: Math.max(0, byCat[c.id] || 0) })).filter((x) => x.v > 0);
@@ -1250,7 +1262,7 @@ function viewStats() {
     h('div', { class: 'list' }, p.cats.map((c) => {
       const sp = byCat[c.id] || 0, st = statusOf(sp, c.budget);
       const pct = c.budget ? Math.min(100, (sp / c.budget) * 100) : sp ? 100 : 0;
-      const share = p.variable ? (c.budget / p.variable) * 100 : 0, real = p.variable ? (sp / p.variable) * 100 : 0;
+      const bud = budgetOf(m, p), share = bud ? (c.budget / bud) * 100 : 0, real = bud ? (sp / bud) * 100 : 0;
       return h('div', { class: 'line-item', style: { '--c': colorOf(c.color), cursor: 'default' } },
         h('div', { class: 'top-line' }, h('span', { class: 'dot' }), h('span', { class: 'name' }, c.name), h('span', { class: 'num small' }, `${moneyW(sp)} / ${moneyW(c.budget)}`)),
         h('div', { class: 'bar' }, h('i', { class: st, style: { width: pct + '%' } })),
@@ -1384,9 +1396,18 @@ function openPlan() {
   const body = $('#planBody');
   let openPicker = null;
   const draw = () => {
-    const assigned = catsTotal(draft), diff = draft.variable - assigned;
+    const assigned = catsTotal(draft), diff = budgetOf(m, draft) - assigned;
     const variable = h('input', { id: 'planVariable', inputmode: 'decimal', value: centsIn(draft.variable), 'aria-label': 'Monthly spending budget' });
     variable.addEventListener('change', () => { const c = parseAmount(variable.value); if (c !== null) draft.variable = c; else variable.value = centsIn(draft.variable); draw(); });
+    const canAuto = !!(D.cash.A || D.cash.B);
+    const mode = h('div', { class: 'seg' }, [['auto', 'Automatic'], ['own', 'Set my own']].map(([k, l]) => h('button', {
+      type: 'button', 'aria-pressed': String((draft.auto ? 'auto' : 'own') === k), disabled: k === 'auto' && !canAuto,
+      onclick: () => { draft.auto = k === 'auto'; if (!draft.auto && !draft.variable) draft.variable = autoBudget(m); draw(); },
+    }, l)));
+    const budgetBox = draft.auto
+      ? h('p', { class: 'small muted' }, h('b', { style: { color: 'var(--ink)' } }, `${moneyW(autoBudget(m))} in ${monthName(m, 'short')}`),
+        ` = A ${moneyW(D.cash.A || 0)} + B ${moneyW(D.cash.B || 0)} × ${daysIn(m)} days ÷ 7. It follows the length of each month and your A and B amounts.`)
+      : h('div', { class: 'stack', style: { gap: '6px' } }, variable, canAuto ? null : h('p', { class: 'tiny muted' }, 'Add your A and B amounts in Settings to have it worked out for you.'));
     const cats = draft.cats.map((c, i) => {
       const name = h('input', { id: 'catName-' + c.id, value: c.name, maxlength: '24', 'aria-label': 'Category name' });
       name.addEventListener('change', () => { c.name = name.value.trim() || c.name; });
@@ -1414,7 +1435,7 @@ function openPlan() {
       h('div', { class: 'grab' }),
       h('div', { class: 'between' }, h('h2', null, `Plan from ${monthName(m)}`), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => $('#planSheet').close() }, '✕')),
       h('p', { class: 'small muted' }, 'Changes apply to this month and carry into the following months. Earlier months keep their own plan.'),
-      h('label', { class: 'field' }, 'Monthly spending budget', variable),
+      h('div', { class: 'section-label' }, 'Monthly spending budget'), mode, budgetBox,
       h('div', { class: 'section-label' }, 'Categories'),
       ...cats,
       h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { const used = new Set(draft.cats.map((c) => c.color)); draft.cats.push({ id: uid('c'), name: 'New category', type: 'want', budget: 0, icon: 'gift', color: Object.keys(COLORS).find((k) => !used.has(k)) || 'teal' }); draw(); } }, '+ Add category'),
@@ -1515,11 +1536,11 @@ function openSettings() {
 function openSetup() {
   const f = $('#setupForm');
   const cur = h('input', { maxlength: '3', autocapitalize: 'characters', placeholder: 'e.g. USD, THB, EUR' });
-  const budget = h('input', { inputmode: 'decimal', placeholder: '0' });
+  const budget = h('input', { inputmode: 'decimal', placeholder: 'Blank: work it out from A and B' });
   const cash = cashFields();
   const err = h('p', { class: 'error', role: 'alert' });
-  const finish = (variable) => {
-    if (!Object.keys(D.plans).length) D.plans[thisMonth()] = { ...clone(DEFAULT_PLAN), variable };
+  const finish = (variable, auto) => {
+    if (!Object.keys(D.plans).length) D.plans[thisMonth()] = { ...clone(DEFAULT_PLAN), variable, auto };
     D.settings.setupDone = true;
     $('#setupSheet').close();
   };
@@ -1533,7 +1554,7 @@ function openSetup() {
     ...cash.fields,
     err,
     h('button', { class: 'btn btn-primary btn-block', type: 'submit' }, 'Start'),
-    h('button', { class: 'btn btn-block', type: 'button', onclick: () => { finish(0); commit(); } }, 'Skip for now'));
+    h('button', { class: 'btn btn-block', type: 'button', onclick: () => { finish(0, false); commit(); } }, 'Skip for now'));
   f.onsubmit = (e) => {
     e.preventDefault();
     const code = cur.value.trim().toUpperCase(), v = budget.value.trim() === '' ? 0 : parseAmount(budget.value), next = cash.read();
@@ -1542,7 +1563,7 @@ function openSetup() {
     if (typeof next === 'string') return showError(err, next);
     D.settings.currency = code; setCurrency(code);
     if (next) D.cash = next;
-    finish(v); commit(); toast('All set');
+    finish(v, !budget.value.trim() && !!next && !!(next.A || next.B)); commit(); toast('All set');
   };
   $('#setupSheet').showModal();
 }

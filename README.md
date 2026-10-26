@@ -6,6 +6,8 @@ Your data is saved on the device you use it on and never leaves it unless you sa
 **What's inside**
 
 - **Spending pool:** how much you can spend right now (see below).
+- **Monthly budget:** worked out from your payments, **A + B × days in the month ÷ 7** (the same daily rate as the spending pool),
+  so it follows the length of each month. In **Edit plan** you can switch to **Set my own** and type an amount instead.
 - **Monthly plan:** a spending budget split into Need/Want categories, plus fixed costs (rent, phone…) you tick off as paid.
   A plan carries into the following months until you change it; earlier months keep their own plan.
 - **Quick logging:** spending, refunds and Zero Days (days you spent nothing). After adding, editing or deleting an entry,
@@ -14,7 +16,8 @@ Your data is saved on the device you use it on and never leaves it unless you sa
 - **Stats:** where it went, needs vs wants, budget vs actual, and your running daily average against your target.
 - Dark, light or automatic theme.
 
-On first open the app asks for your currency, your monthly spending budget and, optionally, your cash amounts.
+On first open the app asks for your currency, your cash amounts (optional) and a monthly spending budget
+(leave it blank to have it worked out from A and B).
 It starts you with four empty categories (Groceries, Transport, Eating out, Other) that you can rename, delete or add to under **Edit plan**.
 
 ## How cash works
@@ -107,7 +110,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v10` to `pocket-budget-v11`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v11` to `pocket-budget-v12`) so devices pick up the new version.
 When you're online the app always loads the newest version, so the update shows the next time you open it.
 If a home-screen app was only in the background, close it fully first. Settings shows which version is running.
 
