@@ -727,7 +727,9 @@ async function slipReader() {
   if (!window.jsQR) await loadScript('vendor/jsqr/jsQR.js');
   if (!slipWorker) {
     const at = (p) => new URL(p, location.href).href;
-    slipWorker = await Tesseract.createWorker('eng', 1, { workerPath: at('vendor/tesseract/worker.min.js'), corePath: at('vendor/tesseract/core'), langPath: at('vendor/tesseract/lang'), gzip: true });
+    // cacheMethod 'none': the service worker's vendor cache already keeps the language file offline, and is replaced
+    // when vendor/ changes; tesseract's own cache would keep a second copy under a fixed name and never update it
+    slipWorker = await Tesseract.createWorker('eng', 1, { workerPath: at('vendor/tesseract/worker.min.js'), corePath: at('vendor/tesseract/core'), langPath: at('vendor/tesseract/lang'), gzip: true, cacheMethod: 'none' });
   }
   return slipWorker;
 }
