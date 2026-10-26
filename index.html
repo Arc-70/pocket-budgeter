@@ -578,10 +578,10 @@ function viewHome() {
       h('button', { class: 'link-btn', onclick: () => { S.tab = 'wallet'; S.month = thisMonth(); render(); } }, 'See cash')));
   }
 
-  // Today: what's left of the month split evenly over the days left, minus what's been spent today
+  // Today: the fixed daily budget (monthly budget ÷ days in the month) minus what's been spent today
   if (isNow) {
     const spentToday = sum(list.filter((x) => x.date === t));
-    const allowance = Math.max(0, Math.round((budget - sum(list.filter((x) => x.date < t))) / (n - dayNum + 1)));
+    const allowance = dailyTarget(m);
     const leftToday = allowance - spentToday;
     out.push(h('div', { class: 'card' },
       h('div', null,
@@ -589,7 +589,7 @@ function viewHome() {
         h('div', { class: 'big ' + (leftToday < 0 ? 'bad' : '') }, moneyW(Math.abs(leftToday))),
         h('div', { class: 'small muted num' }, `${leftToday < 0 ? 'over today’s budget' : 'left to spend today'} · ${moneyW(spentToday)} spent of ${moneyW(allowance)}`)),
       h('div', { class: 'meter' }, h('i', { class: statusOf(spentToday, allowance), style: { width: (allowance ? Math.min(100, (spentToday / allowance) * 100) : spentToday > 0 ? 100 : 0) + '%' } })),
-      h('p', { class: 'tiny muted' }, 'Worked out each day from what’s left this month divided by the days left, including today.')));
+      h('p', { class: 'tiny muted' }, `Your daily budget is ${moneyW(budget)} ÷ ${n} days. It starts fresh each day.`)));
   }
 
   // Month summary
@@ -604,7 +604,7 @@ function viewHome() {
     isNow && budget ? h('p', { class: 'tiny muted' }, 'The mark shows where an even pace would put you today.') : null,
     h('div', { class: 'figures' },
       h('div', null, h('span', { class: 'tiny muted' }, 'Average a day'), h('b', { class: dayNum && avg > target ? 'bad' : '' }, dayNum ? moneyW(avg) : '–')),
-      h('div', null, h('span', { class: 'tiny muted' }, 'Target a day'), h('b', null, moneyW(target))),
+      h('div', null, h('span', { class: 'tiny muted' }, 'Daily budget'), h('b', null, moneyW(target))),
       isNow ? h('div', null, h('span', { class: 'tiny muted' }, 'Days left'), h('b', null, String(n - dayNum + 1)))
         : h('div', null, h('span', { class: 'tiny muted' }, 'Entries'), h('b', null, String(list.filter((t) => !t.zero).length))))));
 
