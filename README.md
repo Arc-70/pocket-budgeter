@@ -10,7 +10,6 @@ Your data is saved on the device you use it on and never leaves it unless you sa
 - **Quick logging:** spending, refunds and Zero Days (days you spent nothing).
 - **Cash in hand:** a running balance of the money you actually have (see below).
 - **Stats:** where it went, needs vs wants, budget vs actual, and your running daily average against your target.
-- **Game mode (optional):** an under-budget streak, levels, weekly stars and achievements.
 - Dark, light or automatic theme.
 
 On first open the app asks for your currency, your monthly spending budget and, optionally, your cash amounts.
@@ -65,7 +64,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v3` to `pocket-budget-v4`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v4` to `pocket-budget-v5`) so devices pick up the new version.
 Open the app twice after updating: the first open downloads the update, the second shows it.
 
 ## Files
