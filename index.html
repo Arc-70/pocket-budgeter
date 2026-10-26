@@ -446,6 +446,7 @@ function freshData() {
     plans: {},  // 'YYYY-MM' -> plan; a month without one uses the latest earlier plan
     paid: {},   // 'YYYY-MM' -> { fixedId: true }
     tx: {},     // 'YYYY-MM' -> [{ id, date, note, cat, amount, zero?, created }]
+    pool: { start: null, rates: [] },  // spending pool: start payday, and the A/B amounts from each date on
   };
 }
 // Fills in missing fields and upgrades older saves. Returns null if `d` isn't Pocket Budget data.
@@ -455,6 +456,7 @@ function normalize(d) {
   Object.assign(out.settings, d.settings);
   delete out.settings.game; delete out.settings.unlocked; // left over from the removed game mode
   out.plans = d.plans || {}; out.paid = d.paid || {}; out.tx = d.tx || {};
+  if (d.pool) Object.assign(out.pool, d.pool);
   if (d.v === 3) Object.assign(out.cash, d.cash);
   else {
     // v2 had B = (X - A) / 4 and cash that started from zero each month
@@ -525,6 +527,124 @@ function balanceOn(date) {
   return c.opening + sum(payments(c.since, date)) - spent;
 }
 
+/* =================================================================== spending pool
+   Self-contained: it reads the A and B amounts and the logged entries and keeps its own settings in D.pool;
+   nothing outside this section depends on it. The pool starts at 0 on a payday, grows each morning by
+   B ÷ 7 + A ÷ the days in that month, and every entry from then on takes its amount out. It can go below 0. */
+
+// The pool's daily share on `date`, using the A and B amounts in force that day
+function poolRate(date) {
+  let r = D.pool.rates[0];
+  for (const x of D.pool.rates) if (x.from <= date) r = x;
+  return r ? r.B / 7 + r.A / daysIn(date.slice(0, 7)) : 0;
+}
+// What went in, what came out and what's left by the end of `date`; null before the start
+function poolAt(date) {
+  const start = D.pool.start;
+  if (!start || date < start) return null;
+  let added = 0;
+  for (let d = start; d <= date; d = addDays(d, 1)) added += poolRate(d);
+  const spent = sum(Object.values(D.tx).flat().filter((t) => t.date >= start && t.date <= date));
+  return { added, spent, value: added - spent };
+}
+// When A or B change, the new amounts apply from today on; earlier days keep the old ones
+function poolSync() {
+  const P = D.pool, last = P.rates[P.rates.length - 1];
+  if (!P.start || !last) return;
+  const A = D.cash.A || 0, B = D.cash.B || 0;
+  if (A === last.A && B === last.B) return;
+  const from = todayStr() > P.start ? todayStr() : P.start;
+  if (last.from === from) Object.assign(last, { A, B });
+  else P.rates.push({ from, A, B });
+  persist();
+}
+// Paydays from six weeks back to four weeks ahead, for choosing where the pool starts
+function poolStartChoices() {
+  const t = todayStr(), from = addDays(t, -42), to = addDays(t, 28), kinds = {};
+  if (D.cash.A) for (let m = from.slice(0, 7); `${m}-01` <= to; m = shiftMonth(m, 1)) if (`${m}-01` >= from) kinds[`${m}-01`] = ['A'];
+  for (const d of bDates(from, to)) (kinds[d] ||= []).push('B');
+  if (D.pool.start && !kinds[D.pool.start]) kinds[D.pool.start] = [];
+  return Object.keys(kinds).sort().map((date) => ({ date, label: `${niceDate(date, true)}${date === t ? ' (today)' : ''}${kinds[date].length ? ` · ${kinds[date].join(' and ')} payday` : ''}` }));
+}
+function poolPicker() {
+  const t = todayStr(), choices = poolStartChoices();
+  const pick = D.pool.start || choices.filter((c) => c.date <= t).map((c) => c.date).pop() || (choices[0] && choices[0].date);
+  return h('select', { 'aria-label': 'Start the pool on' }, choices.map((c) => h('option', { value: c.date, selected: c.date === pick }, c.label)));
+}
+function poolStart(date) {
+  D.pool = { start: date, rates: [{ from: date, A: D.cash.A || 0, B: D.cash.B || 0 }] };
+  commit();
+  toast(`Spending pool starts ${niceDate(date, true)}`);
+}
+const poolHow = (date) => {
+  const r = D.pool.rates.filter((x) => x.from <= date).pop() || D.pool.rates[0];
+  return `Each day adds ${moneyW(r.B)} ÷ 7 + ${moneyW(r.A)} ÷ ${daysIn(date.slice(0, 7))} days = ${money(Math.round(poolRate(date)))}.`;
+};
+
+// Home card for the current month
+function poolCard() {
+  const t = todayStr(), P = D.pool;
+  const head = h('div', { class: 'card-head' }, h('h3', null, 'Spending pool'), P.start ? h('button', { class: 'link-btn', onclick: openSettings }, 'Change') : null);
+  if (!P.start && !D.cash.A && !D.cash.B) {
+    return h('div', { class: 'card' }, head,
+      h('p', { class: 'small muted' }, 'A pool you can spend from that grows a little every day from your A and B payments. Add your A and B amounts to start one.'),
+      h('button', { class: 'btn btn-sm', onclick: openSettings }, 'Add A and B'));
+  }
+  if (!P.start) {
+    const picker = poolPicker();
+    return h('div', { class: 'card' }, head,
+      h('p', { class: 'small muted' }, 'Each day adds B ÷ 7 + A ÷ the days in the month to the pool, and everything you log takes from it. It starts at 0 on a payday:'),
+      picker, h('button', { class: 'btn btn-primary btn-sm', onclick: () => poolStart(picker.value) }, 'Start the pool'));
+  }
+  if (P.start > t) {
+    return h('div', { class: 'card' }, head,
+      h('p', null, `Starts on ${niceDate(P.start, true)} at ${moneyW(0)}.`), h('p', { class: 'tiny muted' }, poolHow(P.start)));
+  }
+  const now = poolAt(t).value, next = poolRate(addDays(t, 1));
+  const spentToday = sum(Object.values(D.tx).flat().filter((x) => x.date === t));
+  const daysBack = now < 0 && next > 0 ? Math.ceil(-now / next) : 0;
+  return h('div', { class: 'card' }, head,
+    h('div', null,
+      h('div', { class: 'small muted' }, `You can spend · today, ${niceDate(t, true)}`),
+      h('div', { class: 'big ' + (now < 0 ? 'bad' : '') }, moneyW(Math.round(now))),
+      h('div', { class: 'small muted num' }, `${moneyW(spentToday)} spent today · +${moneyW(Math.round(next))} tomorrow`)),
+    daysBack ? h('p', { class: 'small bad' }, `Back above ${moneyW(0)} in about ${daysBack} day${daysBack === 1 ? '' : 's'} if you don’t spend.`) : null,
+    h('p', { class: 'tiny muted' }, `${poolHow(t)} Started ${niceDate(P.start, true)}.`));
+}
+// Home card for a past month the pool was running in
+function poolMonthCard(m) {
+  const start = D.pool.start, last = monthEnd(m);
+  if (!start || last < start || m >= thisMonth()) return null;
+  const first = `${m}-01` > start ? `${m}-01` : start;
+  const before = first === start ? { added: 0, spent: 0, value: 0 } : poolAt(addDays(first, -1)), end = poolAt(last);
+  return h('div', { class: 'card' }, h('h3', null, `Spending pool in ${monthName(m, 'short')}`),
+    h('div', { class: 'kv' },
+      h('span', null, first === start ? `Started ${niceDate(start)}` : 'Started at'), h('b', null, moneyW(Math.round(before.value))),
+      h('span', null, 'Added'), h('b', null, '+' + moneyW(Math.round(end.added - before.added))),
+      h('span', null, 'Spent'), h('b', null, '−' + moneyW(Math.round(end.spent - before.spent))),
+      h('span', { class: 'total' }, 'Ended at'), h('b', { class: 'total ' + (end.value < 0 ? 'bad' : '') }, moneyW(Math.round(end.value)))));
+}
+// Settings section
+function poolSettings() {
+  const P = D.pool, out = [h('div', { class: 'section-label' }, 'Spending pool')];
+  if (!P.start && !D.cash.A && !D.cash.B) return [...out, h('p', { class: 'small muted' }, 'Add your A and B amounts above to use a spending pool.')];
+  const picker = poolPicker();
+  out.push(h('p', { class: 'small muted' }, P.start ? `Running since ${niceDate(P.start, true)}. Restarting sets it back to ${moneyW(0)} on the payday you pick.` : 'Not started. Pick the payday it starts on, at 0.'),
+    picker,
+    h('div', { class: 'row' },
+      P.start ? h('button', { class: 'btn btn-danger btn-sm', type: 'button', onclick: async () => {
+        $('#settingsSheet').close();
+        if (await askConfirm('Turn off the spending pool? Its history is cleared; your entries and cash aren’t touched.', 'Turn off')) { D.pool = freshData().pool; commit(); toast('Spending pool turned off'); }
+      } }, 'Turn off') : null,
+      h('span', { class: 'spacer' }),
+      h('button', { class: 'btn btn-sm', type: 'button', onclick: async () => {
+        if (P.start) { $('#settingsSheet').close(); if (!(await askConfirm(`Restart the pool from ${niceDate(picker.value, true)}? It starts again at ${moneyW(0)}.`, 'Restart'))) return; }
+        poolStart(picker.value);
+        if ($('#settingsSheet').open) openSettings();
+      } }, P.start ? 'Restart from this day' : 'Start the pool')));
+  return out;
+}
+
 /* =================================================================== app state */
 const S = { tab: 'home', month: thisMonth(), filter: '', q: '' };
 
@@ -539,6 +659,7 @@ matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme
 
 /* =================================================================== render */
 function render() {
+  poolSync();
   $('#monthLabel').textContent = monthName(S.month);
   for (const b of document.querySelectorAll('.nav-btn')) {
     if (b.dataset.tab === S.tab) b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current');
@@ -578,19 +699,9 @@ function viewHome() {
       h('button', { class: 'link-btn', onclick: () => { S.tab = 'wallet'; S.month = thisMonth(); render(); } }, 'See cash')));
   }
 
-  // Today: the fixed daily budget (monthly budget ÷ days in the month) minus what's been spent today
-  if (isNow) {
-    const spentToday = sum(list.filter((x) => x.date === t));
-    const allowance = dailyTarget(m);
-    const leftToday = allowance - spentToday;
-    out.push(h('div', { class: 'card' },
-      h('div', null,
-        h('div', { class: 'small muted' }, `Today, ${niceDate(t, true)}`),
-        h('div', { class: 'big ' + (leftToday < 0 ? 'bad' : '') }, moneyW(Math.abs(leftToday))),
-        h('div', { class: 'small muted num' }, `${leftToday < 0 ? 'over today’s budget' : 'left to spend today'} · ${moneyW(spentToday)} spent of ${moneyW(allowance)}`)),
-      h('div', { class: 'meter' }, h('i', { class: statusOf(spentToday, allowance), style: { width: (allowance ? Math.min(100, (spentToday / allowance) * 100) : spentToday > 0 ? 100 : 0) + '%' } })),
-      h('p', { class: 'tiny muted' }, `Your daily budget is ${moneyW(budget)} ÷ ${n} days. It starts fresh each day.`)));
-  }
+  // Spending pool
+  const poolBox = isNow ? poolCard() : poolMonthCard(m);
+  if (poolBox) out.push(poolBox);
 
   // Month summary
   const avg = dayNum ? Math.round(spent / dayNum) : 0, target = dailyTarget(m);
@@ -1062,6 +1173,7 @@ function openSettings() {
       D.cash = next || freshData().cash; D.settings.currency = code; setCurrency(code);
       commit(); err.textContent = ''; toast('Saved');
     } }, 'Save'),
+    ...poolSettings(),
     h('div', { class: 'section-label' }, 'Plan'),
     h('button', { class: 'btn btn-block', type: 'button', onclick: () => { $('#settingsSheet').close(); openPlan(); } }, `Edit budget & categories (${monthName(S.month)})`),
     h('div', { class: 'section-label' }, 'Backup'),
