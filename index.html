@@ -195,6 +195,11 @@ input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1
 .cat-pick button i { color: var(--c); display: grid; place-items: center; }
 .cat-pick button[aria-pressed=true] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: var(--accent-soft); }
 .zero-btn { display: flex; align-items: center; justify-content: center; gap: 8px; }
+/* Slip import */
+.slip-row { padding: 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--surface-2); }
+.slip-row.off { opacity: .6; }
+.slip-thumb { width: 64px; border-radius: 6px; border: 1px solid var(--line); flex: none; }
+.slip-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: 8px; }
 
 /* Plan editor */
 .plan-cat { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line); }
@@ -275,6 +280,7 @@ dialog::backdrop { background: var(--scrim); }
 <dialog id="planSheet"><div class="sheet" id="planBody"></div></dialog>
 <dialog id="settingsSheet"><div class="sheet" id="settingsBody"></div></dialog>
 <dialog id="setupSheet"><form class="sheet" id="setupForm" novalidate></form></dialog>
+<dialog id="slipSheet"><div class="sheet" id="slipBody"></div></dialog>
 <dialog id="confirmSheet" class="center"><div class="sheet">
   <p id="confirmText"></p>
   <div class="row"><span class="spacer"></span><button class="btn" id="confirmNo" type="button">Cancel</button><button class="btn btn-primary" id="confirmYes" type="button">OK</button></div>
@@ -447,6 +453,7 @@ function freshData() {
     paid: {},   // 'YYYY-MM' -> { fixedId: true }
     tx: {},     // 'YYYY-MM' -> [{ id, date, note, cat, amount, zero?, created }]
     pool: { start: null, rates: [] },  // spending pool: start payday, and the A/B amounts from each date on
+    slips: { rules: null, me: null, refs: {} },  // slip import: keyword rules, your account's last digits, slip ref -> entry id
   };
 }
 // Fills in missing fields and upgrades older saves. Returns null if `d` isn't Pocket Budget data.
@@ -457,6 +464,7 @@ function normalize(d) {
   delete out.settings.game; delete out.settings.unlocked; // left over from the removed game mode
   out.plans = d.plans || {}; out.paid = d.paid || {}; out.tx = d.tx || {};
   if (d.pool) Object.assign(out.pool, d.pool);
+  if (d.slips) Object.assign(out.slips, d.slips);
   if (d.v === 3) Object.assign(out.cash, d.cash);
   else {
     // v2 had B = (X - A) / 4 and cash that started from zero each month
@@ -642,6 +650,262 @@ function poolSettings() {
         poolStart(picker.value);
         if ($('#settingsSheet').open) openSettings();
       } }, P.start ? 'Restart from this day' : 'Start the pool')));
+  return out;
+}
+
+/* =================================================================== slip import (SCB)
+   Self-contained: reads SCB payment/transfer slip images on the device (text with tesseract.js, the QR code with
+   jsQR, both in vendor/), lets you check them in a list, then adds them as ordinary entries. It keeps its own
+   settings in D.slips (keyword rules, your account, which slips were logged); nothing else depends on it. */
+
+// Keyword rules, made from your categories the first time they're needed
+function slipRules() {
+  if (D.slips.rules) return D.slips.rules;
+  const cats = planFor(thisMonth()).cats, find = (re) => (cats.find((c) => re.test(c.name)) || {}).id || null;
+  const transport = find(/transport|travel|commute|bus|taxi/i), food = find(/food|eat|meal|dining|restaurant|allowance/i);
+  D.slips.rules = [['Grocery', find(/grocer|supermarket/i)], ['Bus', transport], ['MRT', transport], ['Bike', transport], ['Taxi', transport], ['Food', food]]
+    .map(([kw, cat]) => ({ kw, cat }));
+  persist();
+  return D.slips.rules;
+}
+const slipNorm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9฀-๿]/g, '');
+function editDistance(a, b) {
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+// The first rule whose keyword appears in `text` and whose category exists in `month`. Capitals, spaces and dashes
+// don't matter ("7-11" matches "7 11"). Short keywords (3 letters or fewer) must be a whole word, so "bus" doesn't
+// match "business". Longer ones may be one letter off (small slip notes are sometimes misread) or plural ("groceries").
+function slipMatch(text, month) {
+  const cats = planFor(month).cats, all = slipNorm(text), words = String(text || '').toLowerCase().split(/[^a-z0-9฀-๿]+/).filter(Boolean);
+  if (!all) return null;
+  return slipRules().find((r) => {
+    const k = slipNorm(r.kw);
+    if (!k || !cats.some((c) => c.id === r.cat)) return false;
+    if (words.includes(k) || (/[^a-z0-9฀-๿]/i.test(r.kw.trim()) && all.includes(k))) return true;
+    return k.length >= 4 && (all.includes(k) || words.some((w) => (Math.abs(w.length - k.length) <= 1 && editDistance(w, k) <= 1) || (k.length >= 5 && w.startsWith(k.slice(0, -1)))));
+  }) || null;
+}
+
+// The slip's QR holds tag/length/value fields; the transaction reference is sub-field 02 of field 00
+function slipQrRef(s) {
+  const tlv = (str) => { const o = {}; for (let i = 0; i + 4 <= str.length;) { const n = Number(str.slice(i + 2, i + 4)); o[str.slice(i, i + 2)] = str.slice(i + 4, i + 4 + n); i += 4 + n; } return o; };
+  return (s && tlv(tlv(s)['00'] || '')['02']) || null;
+}
+const SLIP_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+// Picks the fields out of a slip's text. `note` is read separately (see slipRead), `qr` is the QR code's text.
+function parseSlip(text, qr, note) {
+  const out = { kind: null, date: null, time: null, amount: null, ref: slipQrRef(qr), from: null, note: '' };
+  const k = text.match(/Successful\s+(payment|transfer)/i);
+  if (k) out.kind = k[1].toLowerCase();
+  const d = text.match(/(\d{1,2})\s*([A-Za-z]{3})[a-z]*\.?\s*(\d{4})\s*[-–]\s*(\d{1,2})[:.](\d{2})/);
+  if (d && SLIP_MONTHS[d[2].toLowerCase()]) { out.date = `${d[3]}-${pad(SLIP_MONTHS[d[2].toLowerCase()])}-${pad(Number(d[1]))}`; out.time = `${pad(Number(d[4]))}:${d[5]}`; }
+  const a = text.match(/AMOUNT[^\d\n]*([\d,]+\.\d{2})/i) || text.match(/AMOUNT[^\n]*\n[^\d\n]*([\d,]+\.\d{2})/i);
+  if (a) out.amount = parseAmount(a[1]);
+  if (!out.ref) { const r = text.match(/Ref\s*ID\s*:?\s*([A-Za-z0-9 ]{10,})/i); if (r) out.ref = r[1].replace(/\s/g, ''); }
+  // the reference starts with the date, which helps when the printed date couldn't be read
+  const rd = out.ref && out.ref.match(/^(20\d\d)(\d\d)(\d\d)/);
+  if (!out.date && rd && Number(rd[2]) >= 1 && Number(rd[2]) <= 12 && Number(rd[3]) >= 1 && Number(rd[3]) <= 31) out.date = `${rd[1]}-${rd[2]}-${rd[3]}`;
+  const f = text.match(/x{3}-x{3}\s*(\d{3})\s*-?\s*(\d)/i);  // the first masked account is the sender's
+  if (f) out.from = `${f[1]}-${f[2]}`;
+  if (note === undefined) note = (text.split(/\bNOTE\b[^\n]*\n/i)[1] || '').split(/For recipient/i)[0];
+  out.note = String(note || '').replace(/\s+/g, ' ').trim().slice(0, 80);
+  return out;
+}
+
+let slipWorker = null;
+function loadScript(src) {
+  return new Promise((ok, fail) => document.head.append(h('script', { src, onload: ok, onerror: () => fail(new Error('Could not load ' + src)) })));
+}
+async function slipReader() {
+  if (!window.Tesseract) await loadScript('vendor/tesseract/tesseract.min.js');
+  if (!window.jsQR) await loadScript('vendor/jsqr/jsQR.js');
+  if (!slipWorker) {
+    const at = (p) => new URL(p, location.href).href;
+    slipWorker = await Tesseract.createWorker('eng', 1, { workerPath: at('vendor/tesseract/worker.min.js'), corePath: at('vendor/tesseract/core'), langPath: at('vendor/tesseract/lang'), gzip: true });
+  }
+  return slipWorker;
+}
+// Reads one slip image: the QR code, the whole text, then the note area again at a larger size
+async function slipRead(file) {
+  const worker = await slipReader();
+  const img = await createImageBitmap(file);
+  const draw = (scale, [sx, sy, sw, sh] = [0, 0, img.width, img.height]) => {
+    const c = document.createElement('canvas'); c.width = Math.round(sw * scale); c.height = Math.round(sh * scale);
+    const x = c.getContext('2d', { willReadFrequently: true });
+    x.filter = 'grayscale(1) contrast(1.6)'; x.drawImage(img, sx, sy, sw, sh, 0, 0, c.width, c.height);
+    return c;
+  };
+  let qr = null;
+  for (const scale of [1, 2]) {
+    const c = draw(scale), px = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+    const q = jsQR(px.data, px.width, px.height);
+    if (q) { qr = q.data; break; }
+  }
+  const scale = Math.min(2, 1600 / img.width);
+  const full = await worker.recognize(draw(scale), {}, { text: true, blocks: true });
+  const words = full.data.words || [];
+  const label = words.find((w) => /^NOTE$/i.test(w.text)), end = words.find((w) => /^recipient/i.test(w.text));
+  let note;
+  if (label) {
+    const y0 = label.bbox.y1 / scale + 2, y1 = end ? end.bbox.y0 / scale - 4 : y0 + 80;
+    if (y1 - y0 > 8) {
+      await worker.setParameters({ tessedit_pageseg_mode: '6' });
+      note = (await worker.recognize(draw(4, [0, y0, img.width, y1 - y0]))).data.text;
+      await worker.setParameters({ tessedit_pageseg_mode: '3' });
+    }
+  }
+  img.close();
+  return parseSlip(full.data.text, qr, note);
+}
+const slipLogged = (ref) => { const id = ref && D.slips.refs[ref]; return !!id && Object.values(D.tx).some((l) => l.some((t) => t.id === id)); };
+
+// Reads the chosen images and opens the list to check them
+async function slipImport(files) {
+  files = [...files].filter((f) => f && f.type.startsWith('image/'));
+  if (!files.length) return;
+  for (const d of document.querySelectorAll('dialog[open]')) d.close();
+  const body = $('#slipBody'), status = h('p', { class: 'small muted' });
+  body.replaceChildren(h('div', { class: 'grab' }), h('h2', null, 'Reading slips'), status,
+    h('p', { class: 'tiny muted' }, 'The first time, the slip reader is downloaded (about 7 MB). After that it works offline. Nothing leaves your phone.'));
+  $('#slipSheet').showModal();
+  const rows = [];
+  try {
+    for (const [i, file] of files.entries()) {
+      status.textContent = `Reading slip ${i + 1} of ${files.length}…`;
+      let r;
+      try { r = await slipRead(file); } catch (e) { if (!window.Tesseract || !slipWorker) throw e; r = null; }
+      rows.push({ file, thumb: URL.createObjectURL(file), read: r });
+    }
+  } catch {
+    body.replaceChildren(h('div', { class: 'grab' }), h('h2', null, 'Couldn’t load the slip reader'),
+      h('p', { class: 'small muted' }, 'It needs an internet connection the first time. Try again when you’re online.'),
+      h('button', { class: 'btn btn-block', type: 'button', onclick: () => $('#slipSheet').close() }, 'Close'));
+    return;
+  }
+  slipReview(rows);
+}
+
+// The list to check: one row per slip, ticked unless it can't or shouldn't be logged
+function slipReview(rows) {
+  const me = D.slips.me, refs = new Set();
+  for (const row of rows) {
+    const r = row.read || {}, why = [];
+    row.date = r.date || ''; row.amount = r.amount ? centsIn(r.amount) : ''; row.ref = r.ref || null;
+    row.note = r.note || (r.kind ? `SCB ${r.kind}` : '');
+    const rule = slipMatch(row.note, (row.date || todayStr()).slice(0, 7));
+    row.cat = rule ? rule.cat : null; row.auto = !!rule; row.remember = false;
+    if (!row.read || (!r.amount && !r.date)) why.push('Couldn’t read this slip. Fill it in or leave it out.');
+    else if (me && r.from && r.from !== me) { why.push('Money sent to you: not logged here. Add it yourself if you need to.'); row.blocked = true; }
+    if (row.ref && (slipLogged(row.ref) || refs.has(row.ref))) { why.push('Already logged.'); row.blocked = true; }
+    if (row.ref) refs.add(row.ref);
+    row.why = why;
+    row.on = !row.blocked && !!row.read && !!(r.amount && r.date);
+  }
+  const body = $('#slipBody'), err = h('p', { class: 'error', role: 'alert' });
+  const draw = () => {
+    const n = rows.filter((r) => r.on).length;
+    body.replaceChildren(
+      h('div', { class: 'grab' }),
+      h('div', { class: 'between' }, h('h2', null, 'Check your slips'), h('button', { class: 'icon-btn', type: 'button', 'aria-label': 'Close', onclick: () => $('#slipSheet').close() }, '✕')),
+      h('p', { class: 'small muted' }, 'Fix anything that was misread and pick categories, then log the ticked ones.'),
+      ...rows.map((row) => slipRow(row, draw)),
+      err,
+      h('button', { class: 'btn btn-primary btn-block', type: 'button', disabled: !n, onclick: () => slipLog(rows, err) }, n ? `Log ${n} ${n === 1 ? 'entry' : 'entries'}` : 'Nothing ticked'));
+  };
+  draw();
+}
+function slipRow(row, redraw) {
+  const month = (isDate(row.date) ? row.date : todayStr()).slice(0, 7), cats = planFor(month).cats;
+  const cat = h('select', { 'aria-label': 'Category', disabled: row.blocked, onchange: (e) => { row.cat = e.target.value || null; row.auto = false; redraw(); } },
+    h('option', { value: '' }, 'Pick a category'), cats.map((c) => h('option', { value: c.id, selected: c.id === row.cat }, c.name)));
+  const field = (label, key, attrs) => h('label', { class: 'field' }, label, h('input', { ...attrs, value: row[key], disabled: row.blocked, onchange: (e) => {
+    row[key] = e.target.value.trim();
+    if (key === 'note' && (row.auto || !row.cat)) { const r = slipMatch(row.note, month); row.cat = r ? r.cat : row.auto ? null : row.cat; row.auto = !!r; redraw(); }
+  } }));
+  return h('div', { class: 'slip-row ' + (row.on ? '' : 'off') },
+    h('div', { class: 'row', style: { alignItems: 'flex-start' } },
+      h('img', { class: 'slip-thumb', src: row.thumb, alt: 'Slip' }),
+      h('div', { class: 'stack', style: { flex: '1', gap: '8px', minWidth: '0' } },
+        h('label', { class: 'row small', style: { fontWeight: '600' } },
+          h('input', { type: 'checkbox', checked: row.on, disabled: row.blocked, style: { width: '20px', minHeight: '20px' }, onchange: (e) => { row.on = e.target.checked; redraw(); } }),
+          row.blocked ? 'Not logged' : 'Log this'),
+        h('div', { class: 'slip-grid' }, field('Amount', 'amount', { inputmode: 'decimal' }), field('Date', 'date', { type: 'date' })),
+        field('Note', 'note', { maxlength: '80' }),
+        cat,
+        row.cat && !row.auto && row.note && !row.blocked ? h('label', { class: 'row tiny muted' },
+          h('input', { type: 'checkbox', checked: row.remember, style: { width: '18px', minHeight: '18px' }, onchange: (e) => { row.remember = e.target.checked; } }),
+          `Always put “${row.note}” in ${(cats.find((c) => c.id === row.cat) || {}).name}`) : null,
+        ...row.why.map((w) => h('p', { class: 'tiny warn' }, w)))));
+}
+function slipLog(rows, err) {
+  const pick = rows.filter((r) => r.on);
+  for (const row of pick) {
+    const c = parseAmount(row.amount);
+    if (!c) return showError(err, `Enter the amount for “${row.note || 'a slip'}”.`);
+    if (!isDate(row.date)) return showError(err, `Pick the date for “${row.note || 'a slip'}”.`);
+    if (!row.cat) return showError(err, `Pick a category for “${row.note || 'a slip'}”.`);
+  }
+  const added = pick.map((row, i) => {
+    const t = { id: uid('t'), date: row.date, note: row.note, cat: row.cat, amount: parseAmount(row.amount), created: Date.now() + i };
+    const m = t.date.slice(0, 7);
+    D.tx[m] = txOf(m).filter((x) => !(x.zero && x.date === t.date)).concat(t);
+    if (row.ref) D.slips.refs[row.ref] = t.id;
+    if (row.remember && !slipRules().some((r) => slipNorm(r.kw) === slipNorm(row.note))) slipRules().push({ kw: row.note, cat: row.cat });
+    return t;
+  });
+  // remember whose account the slips come from, so money sent to you can be told apart
+  if (!D.slips.me) {
+    const counts = {};
+    for (const row of pick) if (row.read && row.read.from) counts[row.read.from] = (counts[row.read.from] || 0) + 1;
+    D.slips.me = Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0] || null;
+  }
+  for (const row of rows) URL.revokeObjectURL(row.thumb);
+  $('#slipSheet').close();
+  commit();
+  toast(`Logged ${added.length} ${added.length === 1 ? 'entry' : 'entries'} from slips`, () => undoTx(added, []));
+}
+function slipPick() {
+  const input = h('input', { type: 'file', accept: 'image/*', multiple: true, onchange: () => slipImport(input.files) });
+  input.click();
+}
+// Slips shared from the gallery wait in the service worker's cache (see sw.js)
+async function slipShared() {
+  if (!new URLSearchParams(location.search).has('shared')) return;
+  history.replaceState(null, '', location.pathname);
+  try {
+    const cache = await caches.open('pocket-budget-shared'), keys = await cache.keys();
+    const files = await Promise.all(keys.map(async (k, i) => { const b = await (await cache.match(k)).blob(); return new File([b], `slip-${i}`, { type: b.type || 'image/jpeg' }); }));
+    await Promise.all(keys.map((k) => cache.delete(k)));
+    if (files.length) slipImport(files);
+  } catch { /* nothing shared */ }
+}
+// Settings section: keyword rules, a box to try them, and your account
+function slipSettings() {
+  const out = [h('div', { class: 'section-label' }, 'Slip keywords'),
+    h('p', { class: 'small muted' }, 'When a slip’s note contains a keyword, its entry goes in that category. Capitals, spaces and dashes don’t matter, so “7-11” also matches “7 11”. The first match wins.')];
+  const cats = planFor(S.month).cats, rules = slipRules();
+  const save = () => { persist(); try_.dispatchEvent(new Event('input')); };
+  out.push(...rules.map((r, i) => h('div', { class: 'fixed-line' },
+    h('input', { value: r.kw, maxlength: '40', 'aria-label': 'Keyword', onchange: (e) => { r.kw = e.target.value.trim(); save(); } }),
+    h('select', { 'aria-label': `Category for ${r.kw}`, onchange: (e) => { r.cat = e.target.value || null; save(); } },
+      h('option', { value: '' }, 'Pick…'), cats.map((c) => h('option', { value: c.id, selected: c.id === r.cat }, c.name))),
+    h('button', { class: 'x-btn', type: 'button', 'aria-label': `Remove ${r.kw}`, onclick: () => { rules.splice(i, 1); persist(); openSettings(); } }, '✕'))));
+  out.push(h('button', { class: 'btn btn-sm', type: 'button', onclick: () => { rules.push({ kw: '', cat: null }); persist(); openSettings(); } }, '+ Add keyword'));
+  const result = h('p', { class: 'small muted' }, 'Type a note to see where it would go.');
+  const try_ = h('input', { placeholder: 'Try a note, e.g. bus to work', 'aria-label': 'Try a note', oninput: () => {
+    const v = try_.value.trim(), r = v && slipMatch(v, S.month);
+    result.textContent = !v ? 'Type a note to see where it would go.' : r ? `→ ${cats.find((c) => c.id === r.cat).name} (keyword “${r.kw}”)` : 'No keyword matches: you’d pick the category yourself.';
+    result.className = 'small ' + (r ? 'good' : 'muted');
+  } });
+  out.push(try_, result);
+  if (D.slips.me) out.push(h('p', { class: 'tiny muted' }, `Slips from your account xxx-xxx${D.slips.me} are logged; slips of money sent to you are left out. `,
+    h('button', { class: 'link-btn', type: 'button', onclick: () => { D.slips.me = null; persist(); openSettings(); } }, 'Forget this account')));
   return out;
 }
 
@@ -998,7 +1262,8 @@ function openTx(t) {
       t ? h('button', { class: 'btn btn-danger', type: 'button', onclick: () => deleteTx(t) }, 'Delete') : null,
       h('span', { class: 'spacer' }),
       h('button', { class: 'btn btn-primary', type: 'submit', style: { minWidth: '140px' } }, 'Save')),
-    t ? null : h('button', { class: 'btn btn-block zero-btn', type: 'button', onclick: () => logZero(date.value) }, icon('zero', 'ico-sm'), 'Spent nothing today? Log a Zero Day'));
+    t ? null : h('button', { class: 'btn btn-block zero-btn', type: 'button', onclick: () => logZero(date.value) }, icon('zero', 'ico-sm'), 'Spent nothing today? Log a Zero Day'),
+    t ? null : h('button', { class: 'btn btn-block', type: 'button', onclick: slipPick }, 'Add from SCB slips…'));
   f.onsubmit = (e) => {
     e.preventDefault();
     const c = parseAmount(amount.value);
@@ -1174,6 +1439,7 @@ function openSettings() {
       commit(); err.textContent = ''; toast('Saved');
     } }, 'Save'),
     ...poolSettings(),
+    ...slipSettings(),
     h('div', { class: 'section-label' }, 'Plan'),
     h('button', { class: 'btn btn-block', type: 'button', onclick: () => { $('#settingsSheet').close(); openPlan(); } }, `Edit budget & categories (${monthName(S.month)})`),
     h('div', { class: 'section-label' }, 'Backup'),
@@ -1181,7 +1447,7 @@ function openSettings() {
     h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: exportBackup }, 'Save backup'), h('button', { class: 'btn', type: 'button', onclick: () => $('#importFile').click() }, 'Restore…')),
     version);
   // the offline cache is named after the app version in sw.js
-  if (window.caches) caches.keys().then((keys) => { const k = keys.find((x) => x.startsWith('pocket-budget-')); if (k) version.textContent = `App version ${k.slice('pocket-budget-'.length)}`; }).catch(() => {});
+  if (window.caches) caches.keys().then((keys) => { const k = keys.find((x) => /^pocket-budget-v\d/.test(x)); if (k) version.textContent = `App version ${k.slice('pocket-budget-'.length)}`; }).catch(() => {});
   if (!$('#settingsSheet').open) $('#settingsSheet').showModal();
 }
 
@@ -1291,6 +1557,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) retur
 
 applyTheme();
 render();
+slipShared();
 if (!D.settings.setupDone) openSetup();
 try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch { /* optional */ }
 if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
