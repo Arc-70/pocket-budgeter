@@ -237,8 +237,11 @@ dialog::backdrop { background: var(--scrim); }
   position: fixed; left: 50%; bottom: calc(76px + env(safe-area-inset-bottom, 0px)); z-index: 30; transform: translate(-50%, 8px); opacity: 0;
   transition: opacity .15s, transform .15s; pointer-events: none; padding: 10px 14px; border-radius: 8px; font-size: .9rem;
   background: var(--ink); color: var(--bg); max-width: calc(100vw - 32px); text-align: center;
+  display: flex; align-items: center; gap: 14px;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
+.toast.show.actionable { pointer-events: auto; }
+.toast-btn { font: inherit; font-weight: 650; color: inherit; background: transparent; border: 0; padding: 4px 2px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; flex: none; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
 </head>
@@ -349,7 +352,13 @@ const moneyS = (c) => F.short.format(c / 100);
 const centsIn = (c) => (c || c === 0 ? String(c / 100) : '');
 
 let toastTimer;
-function toast(msg) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 2600); }
+// `undo`, if given, adds an Undo button and keeps the message up a little longer
+function toast(msg, undo) {
+  const t = $('#toast');
+  t.replaceChildren(msg, undo ? h('button', { class: 'toast-btn', type: 'button', onclick: () => { t.classList.remove('show'); undo(); } }, 'Undo') : '');
+  t.classList.toggle('actionable', !!undo);
+  t.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), undo ? 6000 : 2600);
+}
 function askConfirm(text, ok) {
   return new Promise((resolve) => {
     const d = $('#confirmSheet');
@@ -865,20 +874,27 @@ function openTx(t) {
     if (t) removeTx(t);
     const nm = tx.date.slice(0, 7);
     // logging a real purchase replaces a Zero Day on the same date
-    D.tx[nm] = txOf(nm).filter((x) => !(x.zero && x.date === tx.date && tx.amount > 0)).concat(tx);
+    const replaced = txOf(nm).filter((x) => x.zero && x.date === tx.date && tx.amount > 0);
+    D.tx[nm] = txOf(nm).filter((x) => !replaced.includes(x)).concat(tx);
     $('#txSheet').close();
     if (nm !== S.month) S.month = nm;
     commit();
-    toast(t ? 'Saved' : `Added ${money(c)} · ${catInfo(txCat, nm).name}`);
+    toast(t ? 'Saved' : `Added ${money(c)} · ${catInfo(txCat, nm).name}`, () => undoTx([tx], t ? [t, ...replaced] : replaced));
   };
   $('#txSheet').showModal();
   if (!t) setTimeout(() => amount.focus(), 60);
 }
 function removeTx(t) { const m = t.date.slice(0, 7); D.tx[m] = txOf(m).filter((x) => x.id !== t.id); if (!D.tx[m].length) delete D.tx[m]; }
+// Reverses one add, edit or delete: takes `added` back out and puts `removed` back in
+function undoTx(added, removed) {
+  for (const t of added) removeTx(t);
+  for (const t of removed) { const m = t.date.slice(0, 7); D.tx[m] = txOf(m).concat(t); }
+  commit(); toast('Undone');
+}
 async function deleteTx(t) {
   $('#txSheet').close();
   if (!(await askConfirm(`Delete ${t.zero ? 'this Zero Day' : `“${t.note || catInfo(t.cat, t.date.slice(0, 7)).name}” (${money(Math.abs(t.amount))})`}?`, 'Delete'))) return;
-  removeTx(t); commit(); toast('Deleted');
+  removeTx(t); commit(); toast('Deleted', () => undoTx([], [t]));
 }
 function logZero(date) {
   if (!isDate(date)) { toast('Pick a date first.'); return; }
@@ -886,10 +902,11 @@ function logZero(date) {
   const same = txOf(m).filter((x) => x.date === date);
   if (same.some((x) => x.zero)) { toast(`${dayLabel(date)} is already a Zero Day`); return; }
   if (same.some((x) => x.amount > 0)) { toast(`You already logged spending on ${dayLabel(date)}`); return; }
-  D.tx[m] = txOf(m).concat({ id: uid('z'), date, note: 'Zero Day', cat: null, amount: 0, zero: true, created: Date.now() });
+  const z = { id: uid('z'), date, note: 'Zero Day', cat: null, amount: 0, zero: true, created: Date.now() };
+  D.tx[m] = txOf(m).concat(z);
   $('#txSheet').close();
   commit();
-  toast(`Zero Day logged for ${dayLabel(date)}`);
+  toast(`Zero Day logged for ${dayLabel(date)}`, () => undoTx([z], []));
 }
 function openZero(t) {
   const f = $('#txForm');

@@ -7,7 +7,8 @@ Your data is saved on the device you use it on and never leaves it unless you sa
 
 - **Monthly plan:** a spending budget split into Need/Want categories, plus fixed costs (rent, phone…) you tick off as paid.
   A plan carries into the following months until you change it; earlier months keep their own plan.
-- **Quick logging:** spending, refunds and Zero Days (days you spent nothing).
+- **Quick logging:** spending, refunds and Zero Days (days you spent nothing). After adding, editing or deleting an entry,
+  tap **Undo** in the message at the bottom to reverse it; to fix an older entry, tap it to edit or delete it.
 - **Cash in hand:** a running balance of the money you actually have (see below).
 - **Stats:** where it went, needs vs wants, budget vs actual, and your running daily average against your target.
 - Dark, light or automatic theme.
@@ -64,7 +65,7 @@ Everything lives on the device, so there's no automatic syncing between phone an
 
 Push or upload the changed files to `main`; GitHub Pages republishes them. Your data on the device is not touched.
 
-Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v4` to `pocket-budget-v5`) so devices pick up the new version.
+Whenever you change any file, also bump `VERSION` in `sw.js` (for example from `pocket-budget-v5` to `pocket-budget-v6`) so devices pick up the new version.
 Open the app twice after updating: the first open downloads the update, the second shows it.
 
 ## Files
